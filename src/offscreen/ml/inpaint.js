@@ -75,11 +75,13 @@ export class Inpainter {
   // between tiles, onProgress an optional (done, total) => void called per
   // tile so long inpaints stay visible instead of looking stalled.
   async inpaintPatch(rgba, mask01, w, h, isCancelled, onProgress) {
-    // NOTE (1.2.10): the half-resolution path for large patches (1.2.9)
-    // is reverted here — inpaint stalled mid-run on 1.2.9 and the revert
-    // restores the last known-good behavior. Half-res will return alone
-    // (threads still off) once 1.2.10 is confirmed completing again, to
-    // isolate whether threads or half-res caused the stall.
+    // NOTE (1.2.11): half-resolution for large patches (1.2.9) is removed.
+    // 1.2.8 (threads on, full-res) works; 1.2.9 (threads on, half-res)
+    // stalled mid-run at 73-75%. A Node harness with a mocked model proves
+    // the half-res JS (resize, mask downscale, tiling, blend) is correct
+    // for all sizes, so the hang is at the ORT/WASM level on half-res
+    // shapes — and the one retry uses the same shapes, so it hangs again.
+    // Do not reintroduce half-res without a verified-safe variant.
     if (w <= TILE_MAX && h <= TILE_MAX) return this.inpaintPatchSingle(rgba, mask01, w, h);
     return this.inpaintPatchTiled(rgba, mask01, w, h, isCancelled, onProgress);
   }

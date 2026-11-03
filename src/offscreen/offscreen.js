@@ -20,14 +20,12 @@ try {
 } catch {
   ort.env.wasm.wasmPaths = new URL('../offscreen/vendor/', self.location.href).href;
 }
-// WASM threads stay OFF (numThreads = 1). 1.2.8 raised this to 8 cores and
-// 1.2.9 inpaint then stalled mid-run (73-75%, never completing). The likely
-// cause is ORT's thread workers failing to start in the extension context
-// (Atomics.wait blocks forever waiting for threads that never start), not
-// the half-res inpaint (its code checks out). Threads stay off until a
-// threads-only build is proven safe on a real page. Set before any session
-// is created (ensureModel below).
-ort.env.wasm.numThreads = 1;
+// WASM threads ON (up to 8 cores). Correction to the 1.2.10 note: 1.2.8
+// (threads on, full-res inpaint) works — threads are proven safe. 1.2.9
+// stalled because of half-res inpaint, not threads, so threads are back
+// and half-res is removed (see inpaint.js). Set before any session is
+// created (ensureModel below).
+ort.env.wasm.numThreads = Math.max(1, Math.min(8, (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4));
 
 const detector = new Detector();
 const baberu = new BaberuOCR();
