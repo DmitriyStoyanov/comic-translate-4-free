@@ -68,27 +68,18 @@ async function assetText(path) {
   return (await (await fetch(chrome.runtime.getURL(path))).text());
 }
 
-// WebGPU, per model, with automatic WASM fallback — 1.3.3, narrowed 1.3.5.
-// History: 1.3.0 ran WebGPU for every model and OOM'd the detector on
-// both browsers; 1.3.2 reverted to WASM-only; 1.3.4 fixed the real
-// causes (missing asyncify files, dispose() no-op — see release()).
-// Current assignment:
-// - Detector: WASM only. It OOM'd on WebGPU on both browsers, and it is
-//   only ~1s on WASM anyway, so there is nothing to gain by retrying it.
-// - Baberu: WASM only (1.3.5). It is an autoregressive decoder (prefill
-//   + a step loop with a KV cache that grows every step). On WebGPU
-//   that pattern deadlocks mid-run with no error thrown, so an
-//   error-only fallback cannot catch it — it stuck OCR at 38% on
-//   1.3.4. No hang watchdog exists yet, so Baberu stays on CPU.
-// - LaMa: WebGPU ALONE first. It is feedforward with fixed tile
-//   shapes, one pass per tile — no loop, no growing KV cache — so it
-//   is the model WebGPU suits. If session creation fails
-//   (unsupported op, no GPU), fall back to WASM. If a WebGPU RUN
-//   throws OOM, downgrade to WASM, reload, and retry once (see the
-//   inpaint OOM catch). The downgrade sticks for the host lifetime.
-// A missing navigator.gpu (old browser, or a worker without WebGPU)
-// skips straight to WASM — no doomed attempt.
-const WEBGPU_KINDS = new Set(['inpaint']);
+// WebGPU PARKED (1.3.7) — all models WASM. It failed every way:
+// detector OOM (1.3.0/1.3.1), Baberu hang at OCR 38% (1.3.4), LaMa
+// buffer error (1.3.5), LaMa stall at inpaint 71% (1.3.6). A hang
+// throws no error, so no error-only fallback can catch it — only a
+// hang watchdog (per-run timeout + downgrade + retry) could, and no
+// watchdog can be verified here (no GPU in this VM), so no more GPU
+// guesses. The fallback machinery below stays (dead while this set
+// is empty) for a future watchdog attempt. The WebGPU addon scripts
+// and asyncify files are NOT shipped in 1.3.7, so no GPU code loads
+// at all. 1.3.7 is 1.2.11's proven WASM behavior plus the 1.3.1
+// pixel-peek fix and the 1.3.4 release() fix — working at CPU speed.
+const WEBGPU_KINDS = new Set([]);
 const HAS_WEBGPU = typeof navigator !== 'undefined' && !!navigator.gpu;
 const webgpuDowngraded = new Set(); // kinds that fell back to WASM
 function providersFor(kind) {
