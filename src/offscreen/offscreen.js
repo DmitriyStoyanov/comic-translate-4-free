@@ -20,7 +20,13 @@ try {
 } catch {
   ort.env.wasm.wasmPaths = new URL('../offscreen/vendor/', self.location.href).href;
 }
-ort.env.wasm.numThreads = 1;
+// WASM threads: the shipped build is the threaded one
+// (ort-wasm-simd-threaded), but sessions ran single-threaded until now
+// (numThreads = 1 since the initial commit, no bug behind it). Use up to 8
+// cores — detect, OCR, and inpaint all speed up. If SharedArrayBuffer is
+// unavailable, ORT silently falls back to one thread, so this is safe
+// anywhere. Set before any session is created (ensureModel below).
+ort.env.wasm.numThreads = Math.max(1, Math.min(8, (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4));
 
 const detector = new Detector();
 const baberu = new BaberuOCR();
