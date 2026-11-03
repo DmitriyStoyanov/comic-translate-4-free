@@ -77,26 +77,69 @@ async function assetText(path) {
 // memory ceiling first — the GPU is fast, but the extension cannot hold
 // both states at once. The WebGPU addon script is NOT loaded anymore
 // (see offscreen.html / background.html / ml-worker.js).
-const ML_PROVIDERS = ['wasm'];
+// WebGPU, per model, with automatic WASM fallback — 1.3.3.
+// 1.3.0 ran WebGPU for every model at once (['webgpu','wasm'] dual-state)
+// and OOM'd the detector worker on both browsers; 1.3.2 reverted to
+// WASM-only. This version tries WebGPU again, but narrowly:
+// - Detector: WASM only. It OOM'd on WebGPU on both browsers, and it is
+//   only ~1s on WASM anyway, so there is nothing to gain by retrying it.
+// - Baberu + LaMa: WebGPU ALONE first (not dual-state — holding GPU +
+//   WASM state at once is what likely blew the heap). If session
+//   creation fails (unsupported op, no GPU), fall back to WASM.
+// - If a WebGPU RUN throws OOM, downgrade that model to WASM, reload,
+//   and retry once (see the OCR/inpaint OOM catches). The downgrade
+//   sticks for the host lifetime, so a model that OOMs once never
+//   retries WebGPU again this session. The user never sees the OOM:
+//   worst case is WASM speed, same as 1.3.2.
+// A missing navigator.gpu (old browser, or a worker without WebGPU)
+// skips straight to WASM — no doomed attempt.
+const WEBGPU_KINDS = new Set(['ocr-baberu', 'inpaint']);
+const HAS_WEBGPU = typeof navigator !== 'undefined' && !!navigator.gpu;
+const webgpuDowngraded = new Set(); // kinds that fell back to WASM
+function providersFor(kind) {
+  if (!WEBGPU_KINDS.has(kind) || !HAS_WEBGPU || webgpuDowngraded.has(kind)) return ['wasm'];
+  return ['webgpu'];
+}
 const loading = {};
+async function loadBaberu(providers) {
+  // Fetch + attach one graph at a time so the three buffers (121MB)
+  // are never all resident at once. All three share providers, so
+  // vision→prefill tensors never cross providers.
+  await baberu.loadVis(await modelBuffer('ocr-baberu-vision-v12'), providers);
+  await baberu.loadPre(await modelBuffer('ocr-baberu-prefill-v12'), providers);
+  await baberu.loadStep(await modelBuffer('ocr-baberu-step-v12'), providers);
+}
+async function loadWithWebgpuFallback(kind, loadFn) {
+  // Try WebGPU alone; on creation failure, fall back to WASM once and
+  // remember it for this host lifetime. Throws only if WASM also fails.
+  const providers = providersFor(kind);
+  try {
+    await loadFn(providers);
+  } catch (e) {
+    if (providers[0] !== 'webgpu') throw e;
+    webgpuDowngraded.add(kind);
+    // Dispose any half-loaded WebGPU sessions before the WASM retry,
+    // or they leak GPU resources (and a later load would mix providers).
+    resetGroup(kind);
+    try { await loadFn(['wasm']); } catch (e2) { resetGroup(kind); throw e2; }
+  }
+}
 async function ensureModel(kind) {
   // Await any in-flight load so inference never runs on a null session.
   if (loading[kind]) { await loading[kind]; return; }
   const p = (async () => {
     if (kind === 'detector' && !detector.loaded) {
-      await detector.load(await modelBuffer('detector'), ML_PROVIDERS);
+      await detector.load(await modelBuffer('detector'), ['wasm']);
     } else if (kind === 'ocr-baberu' && !baberu.loaded) {
-      // Fetch + attach one graph at a time so the three buffers (121MB)
-      // are never all resident at once.
       const vocabJson = await assetText(BABERU_VOCAB_ASSET);
       try {
-        await baberu.loadVis(await modelBuffer('ocr-baberu-vision-v12'), ML_PROVIDERS);
-        await baberu.loadPre(await modelBuffer('ocr-baberu-prefill-v12'), ML_PROVIDERS);
-        await baberu.loadStep(await modelBuffer('ocr-baberu-step-v12'), ML_PROVIDERS);
+        await loadWithWebgpuFallback(kind, loadBaberu);
       } catch (e) { baberu.reset(); throw e; }
       baberu.setVocab(vocabJson);
     } else if (kind === 'inpaint' && !inpainter.loaded) {
-      await inpainter.load(await modelBuffer('inpaint'), ML_PROVIDERS);
+      await loadWithWebgpuFallback(kind, async (providers) => {
+        await inpainter.load(await modelBuffer('inpaint'), providers);
+      });
     }
   })();
   loading[kind] = p;
@@ -297,9 +340,17 @@ const handlers = {
           });
         } catch (e) {
           // OOM recovery: drop the inpainter (206MB, not needed for OCR)
-          // and retry this crop once.
+          // first to free memory. If Baberu is on WebGPU, downgrade it
+          // to WASM and reload (the WebGPU run blew the heap) — the
+          // downgrade sticks, so this model never retries WebGPU again
+          // this session. Retry this crop once.
           if (!isOom(e) || c._oomRetried) throw e;
           resetGroup('inpaint');
+          if (providersFor('ocr-baberu')[0] === 'webgpu') {
+            webgpuDowngraded.add('ocr-baberu');
+            baberu.reset();
+            await ensureModel('ocr-baberu');
+          }
           c._oomRetried = true;
           r = await baberu.ocrChunked(u8, c.width, c.height, {
             lang: sourceLang || 'ja',
@@ -359,10 +410,17 @@ const handlers = {
               (done, total) => reportInpaint((pi + done / total) / patches.length));
           } catch (e) {
             // OOM recovery: drop detector + OCR (not needed for inpaint)
-            // and retry this patch once.
+            // first to free memory. If LaMa is on WebGPU, downgrade it
+            // to WASM and reload (the WebGPU run blew the heap) — the
+            // downgrade sticks for this session. Retry this patch once.
             if (!isOom(e) || p._oomRetried) throw e;
             resetGroup('detector');
             resetGroup('ocr-baberu');
+            if (providersFor('inpaint')[0] === 'webgpu') {
+              webgpuDowngraded.add('inpaint');
+              inpainter.reset();
+              await ensureModel('inpaint');
+            }
             p._oomRetried = true;
             out = await inpainter.inpaintPatch(
               rgba, mask, p.width, p.height,
