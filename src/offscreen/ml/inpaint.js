@@ -5,7 +5,7 @@
 //   out: inpainted [1,3,h,w] float32
 // Patch dims must be multiples of 8. All graph ops are WASM-safe
 // (FFC is compiled to Cos/Sin/MatMul; no DFT op in the graph).
-import { toNCHW, padToMod, resizeBilinearRGBA } from '../../shared/image-ops.js';
+import { toNCHW, padToMod } from '../../shared/image-ops.js';
 
 // Tiled inpainting: LaMa's peak WASM memory scales with patch area, and a
 // dense page can merge its text boxes into one huge patch. On Firefox the
@@ -51,24 +51,6 @@ function cropMask(mask01, w, x, y, cw, ch) {
   return out;
 }
 
-// Downscale a 0/1 mask by taking the MAX over each source block: if any
-// source pixel is masked, the dest pixel is masked. Shrinking the mask
-// (e.g. bilinear + threshold) could leave text remnants un-inpainted.
-function downscaleMaskMax(mask01, w, h, sw, sh) {
-  const out = new Uint8Array(sw * sh);
-  for (let y = 0; y < sh; y++) {
-    const y0 = Math.floor(y * h / sh), y1 = Math.max(y0 + 1, Math.min(h, Math.floor((y + 1) * h / sh)));
-    for (let x = 0; x < sw; x++) {
-      const x0 = Math.floor(x * w / sw), x1 = Math.max(x0 + 1, Math.min(w, Math.floor((x + 1) * w / sw)));
-      let m = 0;
-      for (let sy = y0; sy < y1 && !m; sy++)
-        for (let sx = x0; sx < x1; sx++) if (mask01[sy * w + sx]) { m = 1; break; }
-      out[y * sw + x] = m;
-    }
-  }
-  return out;
-}
-
 export class Inpainter {
   constructor() { this.session = null; }
 
@@ -93,21 +75,11 @@ export class Inpainter {
   // between tiles, onProgress an optional (done, total) => void called per
   // tile so long inpaints stay visible instead of looking stalled.
   async inpaintPatch(rgba, mask01, w, h, isCancelled, onProgress) {
-    // Large patches dominate inpaint time (many tiled LaMa runs at full
-    // resolution). Run them at half resolution and upscale: LaMa work
-    // scales with area, so this cuts large-patch time roughly 4-6x. The
-    // inpainted background sits behind translated text, so the softening
-    // from the round-trip is barely visible. Small patches (a single run)
-    // stay full-resolution — already fast, best quality.
-    if (Math.max(w, h) > TILE_MAX) {
-      const sw = Math.max(1, Math.round(w / 2)), sh = Math.max(1, Math.round(h / 2));
-      const smallRGBA = resizeBilinearRGBA(rgba, w, h, sw, sh);
-      const smallMask = downscaleMaskMax(mask01, w, h, sw, sh);
-      const smallOut = (sw <= TILE_MAX && sh <= TILE_MAX)
-        ? await this.inpaintPatchSingle(smallRGBA, smallMask, sw, sh)
-        : await this.inpaintPatchTiled(smallRGBA, smallMask, sw, sh, isCancelled, onProgress);
-      return resizeBilinearRGBA(smallOut, sw, sh, w, h);
-    }
+    // NOTE (1.2.10): the half-resolution path for large patches (1.2.9)
+    // is reverted here — inpaint stalled mid-run on 1.2.9 and the revert
+    // restores the last known-good behavior. Half-res will return alone
+    // (threads still off) once 1.2.10 is confirmed completing again, to
+    // isolate whether threads or half-res caused the stall.
     if (w <= TILE_MAX && h <= TILE_MAX) return this.inpaintPatchSingle(rgba, mask01, w, h);
     return this.inpaintPatchTiled(rgba, mask01, w, h, isCancelled, onProgress);
   }
