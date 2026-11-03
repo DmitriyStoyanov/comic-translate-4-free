@@ -68,25 +68,36 @@ async function assetText(path) {
   return (await (await fetch(chrome.runtime.getURL(path))).text());
 }
 
+// WebGPU first, WASM fallback — for every model, same list. ORT assigns
+// each node to the first provider that supports it, and skips WebGPU
+// entirely when the browser has no GPU (or the addon failed to load), so
+// a machine without WebGPU just runs the proven WASM path. All models
+// share the list so vision→prefill tensors never cross providers.
+// WebGPU supports the ops these models need (Conv, MatMul, Cos for
+// LaMa's Fourier layers, LayerNormalization, Gather); anything else
+// falls back to WASM per node. 1.3.0: the first GPU build — if WebGPU
+// causes a stall or wrong output on a real page, the fallback is to
+// revert this list to ['wasm'] (the 1.2.11 behavior).
+const ML_PROVIDERS = ['webgpu', 'wasm'];
 const loading = {};
 async function ensureModel(kind) {
   // Await any in-flight load so inference never runs on a null session.
   if (loading[kind]) { await loading[kind]; return; }
   const p = (async () => {
     if (kind === 'detector' && !detector.loaded) {
-      await detector.load(await modelBuffer('detector'));
+      await detector.load(await modelBuffer('detector'), ML_PROVIDERS);
     } else if (kind === 'ocr-baberu' && !baberu.loaded) {
       // Fetch + attach one graph at a time so the three buffers (121MB)
       // are never all resident at once.
       const vocabJson = await assetText(BABERU_VOCAB_ASSET);
       try {
-        await baberu.loadVis(await modelBuffer('ocr-baberu-vision-v12'));
-        await baberu.loadPre(await modelBuffer('ocr-baberu-prefill-v12'));
-        await baberu.loadStep(await modelBuffer('ocr-baberu-step-v12'));
+        await baberu.loadVis(await modelBuffer('ocr-baberu-vision-v12'), ML_PROVIDERS);
+        await baberu.loadPre(await modelBuffer('ocr-baberu-prefill-v12'), ML_PROVIDERS);
+        await baberu.loadStep(await modelBuffer('ocr-baberu-step-v12'), ML_PROVIDERS);
       } catch (e) { baberu.reset(); throw e; }
       baberu.setVocab(vocabJson);
     } else if (kind === 'inpaint' && !inpainter.loaded) {
-      await inpainter.load(await modelBuffer('inpaint'));
+      await inpainter.load(await modelBuffer('inpaint'), ML_PROVIDERS);
     }
   })();
   loading[kind] = p;

@@ -4,6 +4,11 @@
 <body>
 <!-- ORT-Web UMD build (classic script, exposes global `ort`) -->
 <script src="./vendor/ort.min.js"></script>
+<!-- WebGPU EP addon (70KB, requires ort.min.js first — not a replacement).
+     Adds the GPU backend; without it, 'webgpu' below is skipped and all
+     inference falls back to WASM. A future onnxruntime update must copy
+     BOTH ort.min.js and ort.webgpu.min.js. -->
+<script src="./vendor/ort.webgpu.min.js"></script>
 <!-- Inpaint progress forwarder (sets __ctInpaintProgress before handlers run) -->
 <script type="module" src="./offscreen-progress.js"></script>
 <script type="module" src="./offscreen.js"></script>
