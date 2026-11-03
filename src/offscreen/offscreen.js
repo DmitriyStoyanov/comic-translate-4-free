@@ -404,14 +404,23 @@ const handlers = {
               () => cancelledRuns.has(runId),
               (done, total) => reportInpaint((pi + done / total) / patches.length));
           } catch (e) {
-            // OOM recovery: drop detector + OCR (not needed for inpaint)
-            // first to free memory. If LaMa is on WebGPU, downgrade it
-            // to WASM and reload (the WebGPU run blew the heap) — the
-            // downgrade sticks for this session. Retry this patch once.
-            if (!isOom(e) || p._oomRetried) throw e;
+            // WebGPU run failure recovery: if LaMa is on WebGPU, ANY
+            // run failure downgrades it to WASM, reloads, and retries
+            // once — not just OOM. WebGPU can fail other ways too
+            // (e.g. buffer_manager.cc WGPUBuffer errors, shader or
+            // device errors), and those must also fall back instead
+            // of failing the page. The downgrade sticks for this
+            // session. Cancelled runs are never retried. If LaMa is
+            // already on WASM, only an OOM gets the drop-others +
+            // retry (as before). _oomRetried guards the single retry.
+            if (p._oomRetried) throw e;
+            const msg = String((e && e.message) || e || '');
+            if (/cancel/i.test(msg)) throw e;
+            const onWebgpu = providersFor('inpaint')[0] === 'webgpu';
+            if (!onWebgpu && !isOom(e)) throw e;
             await resetGroup('detector');
             await resetGroup('ocr-baberu');
-            if (providersFor('inpaint')[0] === 'webgpu') {
+            if (onWebgpu) {
               webgpuDowngraded.add('inpaint');
               await inpainter.reset();
               await ensureModel('inpaint');
