@@ -68,17 +68,16 @@ async function assetText(path) {
   return (await (await fetch(chrome.runtime.getURL(path))).text());
 }
 
-// WebGPU first, WASM fallback — for every model, same list. ORT assigns
-// each node to the first provider that supports it, and skips WebGPU
-// entirely when the browser has no GPU (or the addon failed to load), so
-// a machine without WebGPU just runs the proven WASM path. All models
-// share the list so vision→prefill tensors never cross providers.
-// WebGPU supports the ops these models need (Conv, MatMul, Cos for
-// LaMa's Fourier layers, LayerNormalization, Gather); anything else
-// falls back to WASM per node. 1.3.0: the first GPU build — if WebGPU
-// causes a stall or wrong output on a real page, the fallback is to
-// revert this list to ['wasm'] (the 1.2.11 behavior).
-const ML_PROVIDERS = ['webgpu', 'wasm'];
+// WASM only. WebGPU was tried in 1.3.0-1.3.1 and OOM'd the detector
+// worker on BOTH browsers (Firefox 1.3.1, Chrome 1.3.2 report: "Out of
+// memory while running the text detector"). Running GPU + WASM side by
+// side (GPU buffers plus WASM heap plus CPU/GPU copies for heterogeneous
+// nodes) exceeds the extension contexts' heap limits, even on Chrome's
+// offscreen document. Do not re-enable WebGPU without addressing that
+// memory ceiling first — the GPU is fast, but the extension cannot hold
+// both states at once. The WebGPU addon script is NOT loaded anymore
+// (see offscreen.html / background.html / ml-worker.js).
+const ML_PROVIDERS = ['wasm'];
 const loading = {};
 async function ensureModel(kind) {
   // Await any in-flight load so inference never runs on a null session.

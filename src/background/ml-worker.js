@@ -28,7 +28,6 @@ if (typeof chrome === 'undefined') {
 }
 
 importScripts('../offscreen/vendor/ort.min.js');
-importScripts('../offscreen/vendor/ort.webgpu.min.js'); // WebGPU EP addon (see offscreen.html note)
 
 Promise.all([
   import('../offscreen/offscreen.js'),
