@@ -5,4 +5,4 @@
 // Shown in the popup/options footers, baked into the page-cache key (so a
 // code change can never serve a stale cached page), and read by build.sh
 // for the release zip filename (version only, no suffix).
-export const BUILD = '1.3.0';
+export const BUILD = '1.3.1';

@@ -6,7 +6,15 @@
 // of the pixels. Verified empirically: a 6.4MB ArrayBuffer sent SW->offscreen
 // arrived as {bytes:0, mean:0}. IndexedDB structured-clones binary data
 // reliably, so payloads go through IDB and only the lookup key travels in
-// the message. Keys are namespaced 'px:' and deleted on read (take).
+// the message. Keys are namespaced 'px:'.
+// Deletion rule: OUTPUTS are deleted on read (pixelTake, single-use — the
+// service worker takes each result once). INPUTS are only read (pixelPeek):
+// a worker attempt that fails (crash, OOM, timeout) must not consume the
+// input, or the fallback/retry's read fails with "not found" (1.3.0
+// Firefox bug: the worker took the detect input, failed, and the
+// in-process fallback re-ran the handler on the deleted key). Inputs are
+// dropped by the pipeline finally (pxKeys) after the stage settles, so
+// peeking leaks nothing.
 //
 // Large payloads (>8MB) are chunked: a single huge IDB value can hit
 // QuotaExceeded (e.g. 4000x6000x4 = 96MB). Chunks live at `px:key#i` with a
@@ -53,18 +61,15 @@ export async function pixelPut(key, buffer) {
   await idbPut(d, { id: prefix(key), chunks: n, bytes: ab.byteLength });
 }
 
-/**
- * Read + delete the payload for key. Throws if missing — a missing payload
- * means the handoff broke, and failing loud beats feeding zeros downstream.
- */
-export async function pixelTake(key) {
+/** Read the payload for key WITHOUT deleting it. See the header note. */
+async function pixelRead(key) {
   const d = await db();
   const rec = await idbGet(d, prefix(key));
   if (!rec) throw new Error(`pixel payload "${key}" not found in transfer store`);
   if (rec.chunks) {
-    // Chunked payload: read ALL chunks first, verify size matches the
-    // manifest, and only then delete. Deleting as we go would destroy the
-    // payload on a mid-read failure, making retry impossible.
+    // Chunked payload: read ALL chunks first and verify size matches the
+    // manifest. Deleting as we go would destroy the payload on a mid-read
+    // failure, making retry impossible.
     const parts = [];
     let total = 0;
     for (let i = 0; i < rec.chunks; i++) {
@@ -78,15 +83,35 @@ export async function pixelTake(key) {
     const buf = new Uint8Array(rec.bytes);
     let off = 0;
     for (const u8 of parts) { buf.set(u8, off); off += u8.length; }
-    // Verified complete — now delete chunks + manifest (best-effort).
-    for (let i = 0; i < rec.chunks; i++) {
-      try { await idbDel(d, chunkId(key, i)); } catch { /* best effort */ }
-    }
-    try { await idbDel(d, prefix(key)); } catch { /* best effort */ }
-    return buf.buffer;
+    return { buffer: buf.buffer, chunks: rec.chunks };
+  }
+  return { buffer: rec.data, chunks: 0 };
+}
+
+/**
+ * Read the payload for key WITHOUT deleting it. For INPUTS (worker
+ * handlers): a failed attempt must leave the input for the fallback or
+ * retry. Throws if missing, same as pixelTake.
+ */
+export async function pixelPeek(key) {
+  return (await pixelRead(key)).buffer;
+}
+
+/**
+ * Read + delete the payload for key. For OUTPUTS (service worker takes
+ * each result once). Throws if missing — a missing payload means the
+ * handoff broke, and failing loud beats feeding zeros downstream.
+ */
+export async function pixelTake(key) {
+  const { buffer, chunks } = await pixelRead(key);
+  // Verified complete — now delete chunks + manifest (best-effort; a
+  // failed delete must not lose the payload we just read).
+  const d = await db();
+  for (let i = 0; i < chunks; i++) {
+    try { await idbDel(d, chunkId(key, i)); } catch { /* best effort */ }
   }
   try { await idbDel(d, prefix(key)); } catch { /* best effort */ }
-  return rec.data;
+  return buffer;
 }
 
 /** Best-effort delete (cleanup after a failed/cancelled run). Deletes chunks too. */

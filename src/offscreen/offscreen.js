@@ -9,7 +9,7 @@ import { Detector } from './ml/detector.js';
 import { BaberuOCR } from './ml/baberu.js';
 import { meanBrightness } from '../shared/image-ops.js';
 import { Inpainter } from './ml/inpaint.js';
-import { pixelPut, pixelTake } from '../shared/pixel-bus.js';
+import { pixelPut, pixelPeek } from '../shared/pixel-bus.js';
 
 // Worker-safe: a Firefox inpaint worker imports this module, and a worker
 // may not have chrome.runtime. Fall back to a path relative to this script:
@@ -224,7 +224,7 @@ const handlers = {
     const t0 = performance.now();
     // Pixel bytes arrive via the IDB pixel bus (see pixel-bus.js) — they do
     // not survive chrome.runtime messaging from the service worker.
-    const raw = await pixelTake(key);
+    const raw = await pixelPeek(key);
     const buf = new Uint8ClampedArray(raw);
     let boxes;
     const runDetect = async () => {
@@ -279,7 +279,7 @@ const handlers = {
     try {
       for (const c of crops) {
         throwIfCancelled(runId);
-        const raw = await pixelTake(c.key);
+        const raw = await pixelPeek(c.key);
         const u8 = new Uint8ClampedArray(raw);
         // Skip the model on blank crops: ~1ms variance check vs ~1s of
         // vision+prefill+autoregressive steps. Empty text flows downstream
@@ -340,8 +340,8 @@ const handlers = {
     try {
       for (const [pi, p] of patches.entries()) {
         throwIfCancelled(runId);
-        const rgbaRaw = await pixelTake(p.key);
-        const maskRaw = await pixelTake(p.maskKey);
+        const rgbaRaw = await pixelPeek(p.key);
+        const maskRaw = await pixelPeek(p.maskKey);
         const rgba = new Uint8ClampedArray(rgbaRaw);
         const mask = new Uint8Array(maskRaw);
         // Fast path: if the unmasked background is uniform, fill masked pixels
