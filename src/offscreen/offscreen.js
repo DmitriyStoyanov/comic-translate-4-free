@@ -33,10 +33,10 @@ const inpainter = new Inpainter();
 
 // Drop loaded ORT sessions so the next inference re-reads model files from
 // IndexedDB. group: 'detector' | 'ocr-baberu' | 'inpaint' | '*'.
-function resetGroup(group) {
-  if (group === 'detector' || group === '*') detector.reset();
-  if (group === 'ocr-baberu' || group === '*') baberu.reset();
-  if (group === 'inpaint' || group === '*') inpainter.reset();
+async function resetGroup(group) {
+  if (group === 'detector' || group === '*') await detector.reset();
+  if (group === 'ocr-baberu' || group === '*') await baberu.reset();
+  if (group === 'inpaint' || group === '*') await inpainter.reset();
 }
 
 // WASM OOM signatures from ORT/Emscripten. Matches ml-bridge.js's OOM_RE.
@@ -120,8 +120,8 @@ async function loadWithWebgpuFallback(kind, loadFn) {
     webgpuDowngraded.add(kind);
     // Dispose any half-loaded WebGPU sessions before the WASM retry,
     // or they leak GPU resources (and a later load would mix providers).
-    resetGroup(kind);
-    try { await loadFn(['wasm']); } catch (e2) { resetGroup(kind); throw e2; }
+    await resetGroup(kind);
+    try { await loadFn(['wasm']); } catch (e2) { await resetGroup(kind); throw e2; }
   }
 }
 async function ensureModel(kind) {
@@ -134,7 +134,7 @@ async function ensureModel(kind) {
       const vocabJson = await assetText(BABERU_VOCAB_ASSET);
       try {
         await loadWithWebgpuFallback(kind, loadBaberu);
-      } catch (e) { baberu.reset(); throw e; }
+      } catch (e) { await baberu.reset(); throw e; }
       baberu.setVocab(vocabJson);
     } else if (kind === 'inpaint' && !inpainter.loaded) {
       await loadWithWebgpuFallback(kind, async (providers) => {
@@ -228,7 +228,7 @@ const handlers = {
         }).catch(() => {});
       });
       // Drop any session built from the old bytes so the fresh file is used.
-      resetGroup(spec.group);
+      await resetGroup(spec.group);
       announce({ done: true });
       return { ok: true, bytes: total };
     } catch (e) {
@@ -241,8 +241,8 @@ const handlers = {
 
   // ML_RESET {group} — drop loaded sessions for a model group (used after
   // model delete / download so stale bytes are never reused).
-  [MSG.ML_RESET]({ group }) {
-    resetGroup(group || '*');
+  async [MSG.ML_RESET]({ group }) {
+    await resetGroup(group || '*');
     return { ok: true };
   },
 
@@ -285,8 +285,8 @@ const handlers = {
       // small image — during model load or inference. Drop the heavy models
       // we don't need for detection and retry once; they reload on demand.
       if (!isOom(e)) throw e;
-      resetGroup('ocr-baberu');
-      resetGroup('inpaint');
+      await resetGroup('ocr-baberu');
+      await resetGroup('inpaint');
       boxes = await runDetect();
     } finally {
       releaseRun(runId);
@@ -345,10 +345,10 @@ const handlers = {
           // downgrade sticks, so this model never retries WebGPU again
           // this session. Retry this crop once.
           if (!isOom(e) || c._oomRetried) throw e;
-          resetGroup('inpaint');
+          await resetGroup('inpaint');
           if (providersFor('ocr-baberu')[0] === 'webgpu') {
             webgpuDowngraded.add('ocr-baberu');
-            baberu.reset();
+            await baberu.reset();
             await ensureModel('ocr-baberu');
           }
           c._oomRetried = true;
@@ -414,11 +414,11 @@ const handlers = {
             // to WASM and reload (the WebGPU run blew the heap) — the
             // downgrade sticks for this session. Retry this patch once.
             if (!isOom(e) || p._oomRetried) throw e;
-            resetGroup('detector');
-            resetGroup('ocr-baberu');
+            await resetGroup('detector');
+            await resetGroup('ocr-baberu');
             if (providersFor('inpaint')[0] === 'webgpu') {
               webgpuDowngraded.add('inpaint');
-              inpainter.reset();
+              await inpainter.reset();
               await ensureModel('inpaint');
             }
             p._oomRetried = true;

@@ -65,9 +65,10 @@ export class Inpainter {
 
   // Drop the loaded session so the next inference re-reads the model file
   // from IndexedDB (needed after a re-download; otherwise old bytes stay live).
-  // Best-effort WASM free (see detector.js) — no public session dispose in
-  // this vendored ort; buffers persist until host reload. Avoid reset() churn.
-  reset() { try { this.session?.dispose?.(); } catch {} this.session = null; }
+  // Release frees the session's blocks for reuse (dispose does not exist
+  // on sessions — the old dispose call was a no-op). The WASM heap
+  // itself never shrinks; callers must await reset(). See detector.js.
+  async reset() { try { await this.session?.release?.(); } catch {} this.session = null; }
 
   // rgba: Uint8ClampedArray RGBA, mask01: Uint8Array 0/1 (same w/h).
   // Returns RGBA Uint8ClampedArray of the inpainted patch. Oversized patches

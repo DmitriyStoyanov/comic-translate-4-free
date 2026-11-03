@@ -175,10 +175,11 @@ export class BaberuOCR {
 
   get loaded() { return !!this.vis; }
 
-  // Best-effort WASM free (see detector.js) — no public session dispose in
-  // this vendored ort; buffers persist until host reload. Avoid reset() churn.
-  reset() {
-    for (const s of [this.vis, this.pre, this.stp]) { try { s?.dispose?.(); } catch {} }
+  // Release frees the sessions' blocks for reuse (dispose does not exist
+  // on sessions — the old dispose calls were no-ops). The WASM heap
+  // itself never shrinks; callers must await reset(). See detector.js.
+  async reset() {
+    for (const s of [this.vis, this.pre, this.stp]) { try { await s?.release?.(); } catch {} }
     this.vis = null; this.pre = null; this.stp = null;
   }
 

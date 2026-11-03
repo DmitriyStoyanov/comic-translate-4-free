@@ -51,10 +51,12 @@ export class Detector {
 
   // Drop the loaded session so the next inference re-reads the model file
   // from IndexedDB (needed after a re-download; otherwise the old bytes stay live).
-  // Best-effort WASM free: this vendored ort has no public InferenceSession
-  // dispose, so nulling is all we can do — the old session's WASM buffers
-  // persist until the host page reloads. Avoid reset() churn.
-  reset() { try { this.session?.dispose?.(); } catch {} this.session = null; }
+  // Release frees the session's blocks for reuse (dispose does not exist
+  // on sessions in this ORT version — the old dispose call was a no-op).
+  // The WASM heap itself never shrinks, so its high-water mark stays
+  // until the host reloads. Callers must await reset() before creating
+  // a replacement session, or the free races the new load.
+  async reset() { try { await this.session?.release?.(); } catch {} this.session = null; }
 
   // rgba: Uint8ClampedArray, w/h: image dims. Returns [{xyxy:[x1,y1,x2,y2], label, score}]
   async detect(rgba, w, h, threshold = 0.3, opts = {}) {
