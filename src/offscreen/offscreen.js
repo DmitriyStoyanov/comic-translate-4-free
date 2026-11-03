@@ -68,32 +68,27 @@ async function assetText(path) {
   return (await (await fetch(chrome.runtime.getURL(path))).text());
 }
 
-// WASM only. WebGPU was tried in 1.3.0-1.3.1 and OOM'd the detector
-// worker on BOTH browsers (Firefox 1.3.1, Chrome 1.3.2 report: "Out of
-// memory while running the text detector"). Running GPU + WASM side by
-// side (GPU buffers plus WASM heap plus CPU/GPU copies for heterogeneous
-// nodes) exceeds the extension contexts' heap limits, even on Chrome's
-// offscreen document. Do not re-enable WebGPU without addressing that
-// memory ceiling first — the GPU is fast, but the extension cannot hold
-// both states at once. The WebGPU addon script is NOT loaded anymore
-// (see offscreen.html / background.html / ml-worker.js).
-// WebGPU, per model, with automatic WASM fallback — 1.3.3.
-// 1.3.0 ran WebGPU for every model at once (['webgpu','wasm'] dual-state)
-// and OOM'd the detector worker on both browsers; 1.3.2 reverted to
-// WASM-only. This version tries WebGPU again, but narrowly:
+// WebGPU, per model, with automatic WASM fallback — 1.3.3, narrowed 1.3.5.
+// History: 1.3.0 ran WebGPU for every model and OOM'd the detector on
+// both browsers; 1.3.2 reverted to WASM-only; 1.3.4 fixed the real
+// causes (missing asyncify files, dispose() no-op — see release()).
+// Current assignment:
 // - Detector: WASM only. It OOM'd on WebGPU on both browsers, and it is
 //   only ~1s on WASM anyway, so there is nothing to gain by retrying it.
-// - Baberu + LaMa: WebGPU ALONE first (not dual-state — holding GPU +
-//   WASM state at once is what likely blew the heap). If session
-//   creation fails (unsupported op, no GPU), fall back to WASM.
-// - If a WebGPU RUN throws OOM, downgrade that model to WASM, reload,
-//   and retry once (see the OCR/inpaint OOM catches). The downgrade
-//   sticks for the host lifetime, so a model that OOMs once never
-//   retries WebGPU again this session. The user never sees the OOM:
-//   worst case is WASM speed, same as 1.3.2.
+// - Baberu: WASM only (1.3.5). It is an autoregressive decoder (prefill
+//   + a step loop with a KV cache that grows every step). On WebGPU
+//   that pattern deadlocks mid-run with no error thrown, so an
+//   error-only fallback cannot catch it — it stuck OCR at 38% on
+//   1.3.4. No hang watchdog exists yet, so Baberu stays on CPU.
+// - LaMa: WebGPU ALONE first. It is feedforward with fixed tile
+//   shapes, one pass per tile — no loop, no growing KV cache — so it
+//   is the model WebGPU suits. If session creation fails
+//   (unsupported op, no GPU), fall back to WASM. If a WebGPU RUN
+//   throws OOM, downgrade to WASM, reload, and retry once (see the
+//   inpaint OOM catch). The downgrade sticks for the host lifetime.
 // A missing navigator.gpu (old browser, or a worker without WebGPU)
 // skips straight to WASM — no doomed attempt.
-const WEBGPU_KINDS = new Set(['ocr-baberu', 'inpaint']);
+const WEBGPU_KINDS = new Set(['inpaint']);
 const HAS_WEBGPU = typeof navigator !== 'undefined' && !!navigator.gpu;
 const webgpuDowngraded = new Set(); // kinds that fell back to WASM
 function providersFor(kind) {
