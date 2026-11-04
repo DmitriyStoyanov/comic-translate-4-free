@@ -575,6 +575,22 @@ export function splitPatchesByArea(patches, k = 2) {
   return groups.filter(g => g.patches.length > 0);
 }
 
+// 1.4.0 (m8): share of total patch area held by the largest patch.
+// The service worker skips the pool when this exceeds 0.6: the largest
+// patch cannot be split and will dominate either way, so pool only
+// adds 2x model load for no gain. Pure, exported for the Node harness.
+export function largestPatchAreaShare(patches) {
+  if (!patches || !patches.length) return 0;
+  let total = 0;
+  let largest = 0;
+  for (const p of patches) {
+    const a = (p.width || 0) * (p.height || 0);
+    total += a;
+    if (a > largest) largest = a;
+  }
+  return total > 0 ? largest / total : 0;
+}
+
 // Weighted progress: each group's fraction (0..1 within its subset)
 // weighted by its share of total patch area. Group fractions are
 // monotonic (sequential handler loop), weights are positive, so the
@@ -601,6 +617,14 @@ function poolTimeoutError(timeoutMs) {
 function createPoolSlot(createWorker, readyTimeoutMs) {
   const worker = createWorker();
   const slot = { worker, pending: new Map(), seq: 0, dead: false, terminated: false, onProgress: null, readyPromise: null, _rejectReady: null };
+  // 1.4.0 (m10 follow-up): a slot's readyPromise must never reject
+  // unhandled. If pool creation throws before the Promise.all await
+  // (e.g. a later Worker constructor throws), finally closes the pool
+  // and terminatePoolSlot rejects this slot's still-pending
+  // readyPromise — with no awaiter attached, that is an unhandled
+  // rejection in the background. A no-op catch branch marks it handled;
+  // awaiting the original readyPromise still throws for its awaiter.
+  // (Same guard in createGpuSlot below, for the same reason.)
   slot.readyPromise = new Promise((resolve, reject) => {
     slot._rejectReady = reject;
     const to = setTimeout(() => {
@@ -627,6 +651,7 @@ function createPoolSlot(createWorker, readyTimeoutMs) {
       reject(new Error('pool worker failed to start: ' + String((ev && ev.message) || ev || '')));
     };
   });
+  slot.readyPromise.catch(() => {}); // 1.4.0 (m10): never an unhandled rejection (see comment above).
   return slot;
 }
 
@@ -741,7 +766,12 @@ export async function runPooledInpaint(opts) {
   activePools.set(runId, pool);
   try {
     try {
-      pool.slots = groups.map(() => createPoolSlot(createWorker, readyTimeoutMs));
+      // 1.4.0 (m10): append each slot immediately, so a mid-creation
+      // throw still leaves already-created slots in pool.slots for
+      // finally to terminate (the old map assignment never completed,
+      // so pool.slots stayed empty and created workers leaked).
+      pool.slots = [];
+      for (let i = 0; i < groups.length; i++) pool.slots.push(createPoolSlot(createWorker, readyTimeoutMs));
       await Promise.all(pool.slots.map(s => s.readyPromise));
     } catch (e) {
       throw poolCreationError(e);
@@ -817,17 +847,20 @@ export async function runPooledInpaint(opts) {
 // spec); if hangs prove deterministic, a session stick is a one-line
 // follow-up, not assumed here.
 //
-// Watchdog window: 60s of no progress AND no reply, under the 120s
-// inpaint timeout that bounds it. Justification: a GPU tile should
-// complete in seconds (Chrome GPU inpaint is 24s total for 11 tiles,
-// about 2s per tile; even a huge 512 tile on GPU is well under 60s),
-// so 60s with no tile completing and no reply is hang evidence, not
-// slowness. No total cap is imposed: a slow-but-progressing GPU run
-// (progress arriving regularly) is allowed to exceed 120s total,
-// because killing it would be a false positive, and the WASM retry
-// still has its own 120s callMl timeout. A false positive costs time
-// (60s + WASM retry), never correctness: the run still completes on
-// WASM. The watchdog is inactivity-only, so it catches the 1.3.6
+// Watchdog window, two-phase (1.4.0 m3): 120 s with no progress AND no
+// reply from send (the load window — a fresh GPU worker pays full model
+// load with no progress until the first patch completes), then 60 s of
+// inactivity after the first progress event. Justification: a GPU tile
+// should complete in seconds (Chrome GPU inpaint is 24s total for 11
+// tiles, about 2s per tile; even a huge 512 tile on GPU is well under
+// 60s), so 60s with no tile completing and no reply after progress
+// started is hang evidence, not slowness. No total cap is imposed: a
+// slow-but-progressing GPU run (progress arriving regularly) is allowed
+// to exceed 120s total, because killing it would be a false positive,
+// and the WASM retry still has its own 120s callMl timeout. A false
+// positive costs time (load window + WASM retry), never correctness:
+// the run still completes on WASM. The watchdog is inactivity-only, so
+// it catches the 1.3.6
 // pattern (progress stops at 71%, then silence) as well as a
 // no-progress-from-start hang.
 //
@@ -844,6 +877,15 @@ export async function runPooledInpaint(opts) {
 // routing, and termination shape) but is kept separate so pool
 // behavior cannot regress from GPU changes, and vice versa.
 export const GPU_WATCHDOG_INACTIVITY_MS = 60 * 1000;
+// 1.4.0 (m3): first-progress window. A fresh GPU worker pays full model
+// load (206 MB IDB read + session creation) with no progress until the
+// first patch completes, so arming the 60 s inactivity window at send
+// could kill a progressing-but-silent cold run. The load window is 120 s
+// (matching the inpaint callMl timeout): a load hang is still caught,
+// at 120 s, not never — and once progress arrives, the window drops to
+// the 60 s inactivity window. loadWindowMs is an opts override so the
+// Node harness can use short windows; production always uses 120 s.
+export const GPU_LOAD_WINDOW_MS = 120 * 1000;
 const GPU_READY_TIMEOUT_MS = 5 * 1000;
 
 function gpuHangError(watchdogMs) {
@@ -866,6 +908,10 @@ export function cancelGpuInpaint(runId) {
 function createGpuSlot(createWorker, readyTimeoutMs) {
   const worker = createWorker();
   const slot = { worker, pending: new Map(), seq: 0, dead: false, terminated: false, onProgress: null, readyPromise: null, _rejectReady: null };
+  // 1.4.0 (m10): same no-op-catch guard as createPoolSlot — a
+  // terminateGpuSlot before the readyPromise is awaited must never
+  // surface as an unhandled rejection. (The catch branch is added
+  // after the promise is assigned, below.)
   slot.readyPromise = new Promise((resolve, reject) => {
     slot._rejectReady = reject;
     const to = setTimeout(() => {
@@ -892,6 +938,7 @@ function createGpuSlot(createWorker, readyTimeoutMs) {
       reject(new Error('GPU worker failed to start: ' + String((ev && ev.message) || ev || '')));
     };
   });
+  slot.readyPromise.catch(() => {}); // 1.4.0 (m10): never an unhandled rejection (see comment above).
   return slot;
 }
 
@@ -947,6 +994,7 @@ export async function runGpuInpaint(opts) {
     isCancelled = () => false,
     createWorker = () => new Worker(chrome.runtime.getURL('src/background/ml-gpu-worker.js')),
     watchdogInactivityMs = GPU_WATCHDOG_INACTIVITY_MS,
+    loadWindowMs = GPU_LOAD_WINDOW_MS,
     readyTimeoutMs = GPU_READY_TIMEOUT_MS,
   } = opts || {};
   if (!patches || !patches.length) return { results: [], ms: 0, totalTiles: 0 };
@@ -954,18 +1002,24 @@ export async function runGpuInpaint(opts) {
   const slot = createGpuSlot(createWorker, readyTimeoutMs);
   let watchdogTimer = null;
   let watchdogFired = false;
+  let seenProgress = false;
+  let lastWindowMs = loadWindowMs;
   const clearWatchdog = () => { if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; } };
   const fireWatchdog = () => {
     if (watchdogFired || slot.terminated) return;
     watchdogFired = true;
-    try { diag('inpaint gpu watchdog fired: no progress or reply for ' + (watchdogInactivityMs / 1000) + 's, terminating GPU worker'); } catch {}
-    terminateGpuSlot(slot, gpuHangError(watchdogInactivityMs));
+    try { diag('inpaint gpu watchdog fired: no progress or reply for ' + (lastWindowMs / 1000) + 's, terminating GPU worker'); } catch {}
+    terminateGpuSlot(slot, gpuHangError(lastWindowMs));
   };
-  const armWatchdog = () => {
+  // 1.4.0 (m3): two-phase arming. No arg means "use the phase window":
+  // load window until the first progress event, inactivity window after.
+  const armWatchdog = (windowMs) => {
+    const w = windowMs != null ? windowMs : (seenProgress ? watchdogInactivityMs : loadWindowMs);
+    lastWindowMs = w;
     clearWatchdog();
-    if (!slot.terminated && !watchdogFired) watchdogTimer = setTimeout(fireWatchdog, watchdogInactivityMs);
+    if (!slot.terminated && !watchdogFired) watchdogTimer = setTimeout(fireWatchdog, w);
   };
-  const noteActivity = () => { if (!slot.terminated && !watchdogFired) armWatchdog(); };
+  const noteActivity = () => { if (!slot.terminated && !watchdogFired) { seenProgress = true; armWatchdog(); } };
   const job = { close(err) { clearWatchdog(); terminateGpuSlot(slot, err || gpuCancelledError()); } };
   activeGpuJobs.set(runId, job);
   try {
@@ -1010,8 +1064,9 @@ export async function runGpuInpaint(opts) {
 // keep going through callMl, and the doc's own WEBGPU_KINDS stays empty
 // — only the spawned worker realm has ['inpaint'].
 //
-// Watchdog: background-side (this module, SW thread), 60s of no progress
-// AND no reply, same window and justification as Firefox GPU1. Progress
+// Watchdog: background-side (this module, SW thread), two-phase like
+// Firefox GPU1 (1.4.0 m3): 120 s load window from send, then 60 s of no
+// progress AND no reply after the first progress event. Progress
 // arrives one-way from the doc via ML_INPAINT_PROGRESS (offscreen-
 // progress.js, throttled 500ms + final 1.0); the SW's progress branch
 // forwards it here via notifyChromeGpuProgress, which re-arms the
@@ -1073,25 +1128,30 @@ export async function runChromeGpuInpaint(opts) {
     sendGpuMessage = (msg) => chrome.runtime.sendMessage(msg),
     cancelGpuMessage = (msg) => { try { const p = chrome.runtime.sendMessage(msg); if (p && p.catch) p.catch(() => {}); } catch {} },
     watchdogInactivityMs = GPU_WATCHDOG_INACTIVITY_MS,
+    loadWindowMs = GPU_LOAD_WINDOW_MS,
   } = opts || {};
   if (!patches || !patches.length) return { results: [], ms: 0, totalTiles: 0 };
   if (isCancelled()) throw gpuCancelledError();
   let watchdogTimer = null;
   let watchdogFired = false;
+  let seenProgress = false;
+  let lastWindowMs = loadWindowMs;
   let cancelReject = null;
   const clearWatchdog = () => { if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; } };
   const fireWatchdog = () => {
     if (watchdogFired) return;
     watchdogFired = true;
-    try { diag('inpaint gpu watchdog fired: no progress or reply for ' + (watchdogInactivityMs / 1000) + 's, terminating GPU worker'); } catch {}
+    try { diag('inpaint gpu watchdog fired: no progress or reply for ' + (lastWindowMs / 1000) + 's, terminating GPU worker'); } catch {}
     try { cancelGpuMessage({ type: MSG.ML_GPU_CANCEL, runId }); } catch {}
-    try { cancelReject?.(gpuHangError(watchdogInactivityMs)); } catch {}
+    try { cancelReject?.(gpuHangError(lastWindowMs)); } catch {}
   };
-  const armWatchdog = () => {
+  const armWatchdog = (windowMs) => {
+    const w = windowMs != null ? windowMs : (seenProgress ? watchdogInactivityMs : loadWindowMs);
+    lastWindowMs = w;
     clearWatchdog();
-    if (!watchdogFired) watchdogTimer = setTimeout(fireWatchdog, watchdogInactivityMs);
+    if (!watchdogFired) watchdogTimer = setTimeout(fireWatchdog, w);
   };
-  const noteActivity = () => { if (!watchdogFired) armWatchdog(); };
+  const noteActivity = () => { if (!watchdogFired) { seenProgress = true; armWatchdog(); } };
   const job = {
     close(err) {
       clearWatchdog();

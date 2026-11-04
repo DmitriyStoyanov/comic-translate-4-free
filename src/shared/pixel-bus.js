@@ -19,7 +19,7 @@
 // Large payloads (>8MB) are chunked: a single huge IDB value can hit
 // QuotaExceeded (e.g. 4000x6000x4 = 96MB). Chunks live at `px:key#i` with a
 // manifest at `px:key` ({chunks, bytes}). Small payloads use one record.
-import { openDb, idbGet, idbPut, idbDel } from './contracts.js';
+import { openDb, idbGet, idbPut, idbDel, idbKeys } from './contracts.js';
 
 let dbPromise = null;
 function db() {
@@ -112,6 +112,29 @@ export async function pixelTake(key) {
   }
   try { await idbDel(d, prefix(key)); } catch { /* best effort */ }
   return buffer;
+}
+
+/**
+ * 1.4.0 (m5): delete every staged pixel payload belonging to one dead
+ * run. Called by orphan recovery (failOrphanedRun) after background
+ * death, where the pipeline finally never ran. Keys are matched by
+ * prefix 'px:' AND containing the runId — that covers manifests
+ * (px:key, where the key embeds the runId) and chunk records
+ * (px:key#i, which also contain it). Model records (non-px: ids in the
+ * same models store) are never touched, and the page-cache is a
+ * separate store, also untouched. Best-effort, never throws.
+ */
+export async function pixelPruneRun(runId) {
+  if (!runId) return;
+  let d;
+  try { d = await db(); } catch { return; }
+  let keys;
+  try { keys = await idbKeys(d); } catch { return; }
+  for (const k of keys) {
+    if (typeof k === 'string' && k.startsWith('px:') && k.includes(runId)) {
+      try { await idbDel(d, k); } catch { /* best effort */ }
+    }
+  }
 }
 
 /** Best-effort delete (cleanup after a failed/cancelled run). Deletes chunks too. */

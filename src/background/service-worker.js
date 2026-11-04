@@ -9,11 +9,11 @@ import {
   boxIoU, clampBox, dedupAndMergeSeams, mergePaddedBoxes,
 } from '../shared/textblock.js';
 import { toGrayU8, meanBrightness, renderScale, resizeBilinearRGBA } from '../shared/image-ops.js';
-import { pixelPut, pixelTake, pixelDrop } from '../shared/pixel-bus.js';
+import { pixelPut, pixelTake, pixelDrop, pixelPruneRun } from '../shared/pixel-bus.js';
 import { generateMask } from '../shared/mask.js';
 import { translateBlocks, checkAzure, checkLmStudio, BACKEND_LABEL, BACKEND_SHORT_LABEL } from './translators.js';
 import { detectPageLang } from '../shared/lang-detect.js';
-import { mlHostAlive, ensureMlHost, callMl, cancelMlForRun, runPooledInpaint, cancelPooledInpaint, runGpuInpaint, cancelGpuInpaint, runChromeGpuInpaint, cancelChromeGpuInpaint, notifyChromeGpuProgress, makeCanvas, canvasToBlob, directHandlers, WEBP_TYPE, WEBP_QUALITY, setMlAlarmRecoveryHook } from './ml-bridge.js';
+import { mlHostAlive, ensureMlHost, callMl, cancelMlForRun, runPooledInpaint, cancelPooledInpaint, largestPatchAreaShare, runGpuInpaint, cancelGpuInpaint, runChromeGpuInpaint, cancelChromeGpuInpaint, notifyChromeGpuProgress, makeCanvas, canvasToBlob, directHandlers, WEBP_TYPE, WEBP_QUALITY, setMlAlarmRecoveryHook } from './ml-bridge.js';
 import {
   initPageCache, buildCacheKey, buildCacheKeyTier1, buildCacheKeyTier2,
   pageCacheGet, pageCachePut,
@@ -32,10 +32,24 @@ import { baseDomain, displayHost, hostOf, isSiteAllowed, imageHostOrigins } from
 const diagLogBuf = [];
 function diagPush(line) {
   try {
-    console.error('[ct-diag] ' + line);
+    // 1.4.0 (m7): only real failure/recovery/timeout lines go out as
+    // console.error. Benign diagnostic lines (loaded, keepalive,
+    // thread-info, start/done, tiles) go to console.debug, so the
+    // console is not a wall of red "errors" that are not errors. The
+    // panel-log buffer is unchanged (every line is still buffered).
+    const s = String(line);
+    if (/fail|error|timeout|watchdog|orphan|alarm/i.test(s)) console.error('[ct-diag] ' + line);
+    else if (typeof console.debug === 'function') console.debug('[ct-diag] ' + line);
+    else console.log('[ct-diag] ' + line);
     diagLogBuf.push('[ct-diag] ' + line);
     if (diagLogBuf.length > 200) diagLogBuf.shift();
   } catch {}
+}
+// 1.4.0 (m6): each run's (and each recovery's) panel log is its own.
+// Called at run start and at recovery start, before any diagPush for
+// that run/recovery, so a sent log never carries the tail of older runs.
+function clearDiagLog() {
+  try { diagLogBuf.length = 0; } catch {}
 }
 initPageCache();
 
@@ -524,6 +538,10 @@ async function emitDebug(runId, tabId, settings, stage, payload) {
 // gate (emitDebug returns early when debugMode is off, so the user
 // would never see it). Same 5s race + swallow as emitDebug, plus
 // debug:true so the panel auto-shows and renders this tab at once.
+// This function itself stays ungated: failure and recovery paths call
+// it precisely because the user needs the log then. The SUCCESS path
+// gates before calling (see there, 1.4.0 M1), so non-debug users do
+// not get a panel pop on every good run.
 async function sendDiagLog(tabId, runId) {
   try {
     await Promise.race([
@@ -834,6 +852,7 @@ async function runPipeline(tabId, opts = {}) {
   // a 50-block translate doesn't keep burning quota after the user cancelled.
   const abortController = new AbortController();
   runs.set(runId, { cancelled: false, tabId, abortController });
+  clearDiagLog(); // 1.4.0 (m6): this run's panel log is its own, not the tail of older runs.
   persistRunRecord(runId, tabId, 'capture'); // FIX1: see helpers above.
   const settings = await getSettings();
   const timings = {};
@@ -841,7 +860,7 @@ async function runPipeline(tabId, opts = {}) {
   // Firefox: pre-load the 206MB LaMa first, before detector/OCR fragment the
   // WASM heap. A fragmented heap can't provide the contiguous block LaMa needs.
   if (directHandlers()) {
-    try { await callMl({ type: MSG.ML_ENSURE, model: 'inpaint' }); } catch (e) { /* loaded on demand */ }
+    try { await callMl({ type: MSG.ML_ENSURE, model: 'inpaint' }); } catch (e) { diagPush('inpaint preload failed, loading on demand: ' + String((e && e.message) || e).slice(0, 120)); }
   }
   const pxKeys = []; // IDB pixel-bus keys created this run; dropped in finally
   let result;
@@ -1258,7 +1277,7 @@ async function runPipeline(tabId, opts = {}) {
               diag: diagPush,
               isCancelled: () => runs.get(runId)?.cancelled === true,
             });
-            diagPush('inpaint gpu done ms ' + r.ms + ' totalTiles ' + (r.totalTiles || 0));
+            diagPush('inpaint gpu done ms ' + r.ms + ' totalTiles ' + (r.totalTiles || 0) + (r.readyMs != null ? ' readyMs ' + r.readyMs : ''));
           } catch (e) {
             checkCancelled(runId);
             if (e && e.gpuSkipped) {
@@ -1275,23 +1294,31 @@ async function runPipeline(tabId, opts = {}) {
         // POOL1 (Firefox only): two dedicated ML workers, one per patch
         // group, each running the existing sequential handler loop over
         // its subset. Chrome keeps the single path (offscreen document).
-        // Pool creation failure falls back to the single call, exactly
-        // today's behavior; a group failure after creation fails the
-        // run cleanly (no partial page). Cancelled runs never fall back.
-          try {
-            r = await runPooledInpaint({
-              runId, patches: wirePatches,
-              onProgress: (frac) => parProgress('inpaint', frac),
-              diag: diagPush,
-              isCancelled: () => runs.get(runId)?.cancelled === true,
-            });
-            diagPush('inpaint pool done ms ' + r.ms + ' totalTiles ' + (r.totalTiles || 0));
-          } catch (e) {
-            checkCancelled(runId);
-            if (e && e.poolCreationFailed) {
-              diagPush('inpaint pool creation failed, falling back to single: ' + String((e && e.message) || e).slice(0, 120));
+        // 1.4.0 (m8): balance gate — skip pool when the largest patch
+        // holds >60% of total area. It cannot be split and will dominate
+        // either way, so pool only adds 2x model load for no gain.
+        // 1.4.0 (M2): ANY pool failure (creation OR group) falls back
+        // to single. Published users must not be pool-breakage
+        // detectors. The single retry replaces the whole pool result,
+        // never merges partial pool output. Cancelled runs never fall back.
+          const poolShare = largestPatchAreaShare(wirePatches);
+          if (poolShare > 0.6) {
+            diagPush('inpaint pool skipped: largest patch holds ' + Math.round(poolShare * 100) + '% of area, using single');
+            r = await callMlChecked(runId, { type: MSG.ML_INPAINT, runId, patches: wirePatches });
+          } else {
+            try {
+              r = await runPooledInpaint({
+                runId, patches: wirePatches,
+                onProgress: (frac) => parProgress('inpaint', frac),
+                diag: diagPush,
+                isCancelled: () => runs.get(runId)?.cancelled === true,
+              });
+              diagPush('inpaint pool done ms ' + r.ms + ' totalTiles ' + (r.totalTiles || 0));
+            } catch (e) {
+              checkCancelled(runId);
+              diagPush('inpaint pool ' + (e && e.poolCreationFailed ? 'creation failed' : 'group failed') + ', falling back to single: ' + String((e && e.message) || e).slice(0, 120));
               r = await callMlChecked(runId, { type: MSG.ML_INPAINT, runId, patches: wirePatches });
-            } else throw e;
+            }
           }
         } else {
           r = await callMlChecked(runId, {
@@ -1501,12 +1528,19 @@ async function runPipeline(tabId, opts = {}) {
       console.warn('[ct] page-cache write failed:', String((e && e.message) || e).slice(0, 120));
     }
     setProgress(runId, 'done', 1, { backendLabel: BACKEND_SHORT_LABEL[blocks?.[0]?.backendUsed || settings.translationBackend] || settings.translationBackend });
-    // MEASURE1 diagnostic only: also send the panel log on SUCCESS, so
-    // the thread-info and tile lines are copyable after a good run, not
-    // only on failure. Error runs still send from the catch below (this
-    // line never runs on that path), and cancelled runs throw before
-    // reaching here, so there is no duplicate and no quiet-cancel leak.
-    await sendDiagLog(tabId, runId);
+    // 1.4.0 (M1): success-path panel log is gated on debugMode. The
+    // ungated send auto-opened the debug panel on EVERY successful run
+    // even with debugMode off. Auto-show-off + stored-for-manual-open
+    // was NOT used: no manual open path exists (the overlay only shows
+    // via debug:true messages; the pill has no open action), so a
+    // stored-but-hidden log would be unreachable without new UI (which
+    // needs James's approval — see the report-back UI question). Gating
+    // on debugMode fully fixes the pop-up for non-debug users; debug
+    // users still get the success log (auto-shown, as before). Error
+    // runs still send from the catch below (this line never runs on
+    // that path), and cancelled runs throw before reaching here, so
+    // there is no duplicate and no quiet-cancel leak.
+    if (settings.debugMode) await sendDiagLog(tabId, runId);
     result = { runId, ok: true };
   } catch (e) {
     let msg;
@@ -1620,7 +1654,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   // without asking the user.
   try {
     const inFlight = [...runs].some(([, r]) => r.tabId === tabId && !r.cancelled);
-    if (inFlight) diagPush('tab updated tab ' + tabId + ' status ' + (changeInfo && changeInfo.status) + ' url ' + (changeInfo && changeInfo.url ? changeInfo.url : '(same url)') + ' at ' + new Date().toISOString());
+    if (inFlight) diagPush('tab updated tab ' + tabId + ' status ' + (changeInfo && changeInfo.status) + ' at ' + new Date().toISOString());
   } catch {}
   if (!changeInfo || changeInfo.status !== 'complete') return;
   (async () => {
@@ -1922,34 +1956,63 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true;
 });
 
-// FIX1: orphan + alarm recovery (Firefox background page only).
-// Runs once when this background page loads. If a previous background died
-// mid-run, its persisted record is still in storage (the in-memory runs map
-// died with it). Failing it cleanly here unfreezes the pill and shows the
-// panel log, instead of leaving the pill frozen at the last progress.
-// Gated to background pages (window.document exists): Chrome service
-// workers restart often and already have the alarm backup, so they skip
-// this to avoid double-failing a run the alarm already handled.
+// FIX1: orphan + alarm recovery. Runs once when this background page /
+// service worker loads. If a previous background died mid-run, its
+// persisted record is still in storage (the in-memory runs map died with
+// it). Failing it cleanly here unfreezes the pill and shows the panel
+// log, instead of leaving the pill frozen at the last progress.
+// 1.4.0 (m4): Chrome service workers now run this too, with a guard:
+// orphans with a pending ct-ml alarm entry are skipped (the alarm backup
+// will fail those, single error), while orphans with NO ct-ml entry
+// (GPU/pool runs, which bypass callMl and create no alarm entries, and
+// runs past ML) are failed here — previously they were lost with a
+// stuck pill and no error. Firefox behaviour is unchanged (all orphans
+// failed here); m1 idempotence prevents the alarm double-fail there.
+// 1.4.0 (m1): runIds already failed by recovery in this background.
+// Same-background guard for orphan-then-alarm duplicates; the storage
+// check inside failOrphanedRun covers cross-restart duplicates.
+const recoveredOrphanRuns = new Set();
+// Returns true only if this call actually sent the error. Callers send
+// their error diag + panel log ONLY when this returns true, so one
+// background death produces one error, not orphan + alarm.
 async function failOrphanedRun(orphanRunId, rec, msg) {
-  // Remove first: never fail the same orphan twice (e.g., if this
-  // background restarts again mid-recovery).
-  await clearRunRecord(orphanRunId);
+  if (recoveredOrphanRuns.has(orphanRunId)) return false;
+  recoveredOrphanRuns.add(orphanRunId);
+  while (recoveredOrphanRuns.size > 64) recoveredOrphanRuns.delete(recoveredOrphanRuns.values().next().value);
   // FIX2: a recovered orphan's repeating keepalive alarm must not fire
-  // forever — clear it here (finally never ran for this run). Best-effort.
+  // forever — clear it here (finally never ran for this run). Best-effort,
+  // and idempotent, so it is safe to clear even on the skip path below
+  // (a previous recovery may have died after clearing the record but
+  // before clearing the alarm).
   try {
     if (typeof chrome !== 'undefined' && chrome.alarms) {
       const p = chrome.alarms.clear('ct-keepalive:' + orphanRunId);
       if (p && p.catch) p.catch(() => {});
     }
   } catch {}
-  if (rec.tabId == null) return;
+  // Storage check: if no record remains, an earlier recovery already
+  // handled this run (or it ended normally) — do not send a second
+  // error. A storage read failure falls through to failing the run:
+  // a duplicate error is a wart, a frozen pill with no error is worse.
+  try {
+    const all = (await chrome.storage.local.get(ACTIVE_RUNS_KEY))[ACTIVE_RUNS_KEY] || {};
+    if (!all[orphanRunId]) return false;
+  } catch {}
+  // Remove first: never fail the same orphan twice (e.g., if this
+  // background restarts again mid-recovery).
+  await clearRunRecord(orphanRunId);
+  // 1.4.0 (m5): drop this dead run's staged pixel payloads (the
+  // pipeline finally never ran for it). Best-effort; never blocks error.
+  try { await pixelPruneRun(orphanRunId); } catch {}
+  if (rec.tabId == null) return false;
   const tab = await chrome.tabs.get(rec.tabId).catch(() => null);
-  if (!tab) return;
+  if (!tab) return false;
   try { await chrome.scripting.executeScript({ target: { tabId: rec.tabId }, files: CONTENT_SCRIPT_FILES }); } catch {}
   // RUN_STARTED first: it sets the tab's current run to this runId, so the
   // error + panel log below are not rejected as stale.
   try { await chrome.tabs.sendMessage(rec.tabId, { type: MSG.RUN_STARTED, runId: orphanRunId }); } catch {}
   try { await chrome.tabs.sendMessage(rec.tabId, { type: MSG.RUN_PROGRESS, runId: orphanRunId, stage: 'error', error: msg, direct: true }); } catch {}
+  return true;
 }
 async function recoverOrphanedRuns() {
   try {
@@ -1957,11 +2020,35 @@ async function recoverOrphanedRuns() {
     for (const orphanRunId of Object.keys(all)) {
       const rec = all[orphanRunId];
       try {
+        // 1.4.0 (m4, Chrome service workers only): skip orphans with a
+        // pending ct-ml alarm entry — the alarm backup will fail those
+        // (single error). On a storage-list failure, also skip (leave
+        // the record for the next load) rather than risk a double-fail.
+        // Firefox skips this check entirely (all orphans failed here).
+        if (!(typeof window !== 'undefined' && window.document)) {
+          let hasMlAlarm = false;
+          let checkFailed = false;
+          try {
+            const store = await chrome.storage.local.get(null);
+            hasMlAlarm = Object.keys(store || {}).some(k => k.startsWith('ct-ml-pending:') && k.includes(':' + orphanRunId + ':'));
+          } catch { checkFailed = true; }
+          if (checkFailed) {
+            diagPush('orphan skipped run ' + orphanRunId + ': ML alarm check failed, leaving record for next load');
+            continue;
+          }
+          if (hasMlAlarm) {
+            diagPush('orphan skipped run ' + orphanRunId + ': pending ML alarm will handle it');
+            continue;
+          }
+        }
+        clearDiagLog(); // 1.4.0 (m6): each recovery's log is its own.
         const msg = 'Translation stopped because the background restarted while it was at stage ' + (rec.stage || 'unknown') + ' — please run translate again. (The detailed log from before the restart was in memory only and is lost.)';
         diagPush('orphan recovery run ' + orphanRunId + ' tab ' + rec.tabId + ' died at stage ' + (rec.stage || 'unknown') + ' started ' + (rec.startedAt ? new Date(rec.startedAt).toISOString() : 'unknown') + ' lastStageUpdate ' + (rec.updatedAt ? new Date(rec.updatedAt).toISOString() : 'unknown'));
-        await failOrphanedRun(orphanRunId, rec, msg);
-        diagPush('orphan error: ' + msg);
-        if (rec.tabId != null) await sendDiagLog(rec.tabId, orphanRunId);
+        const sent = await failOrphanedRun(orphanRunId, rec, msg);
+        if (sent) {
+          diagPush('orphan error: ' + msg);
+          if (rec.tabId != null) await sendDiagLog(rec.tabId, orphanRunId);
+        }
         diagPush('orphan recovery done run ' + orphanRunId);
       } catch {}
     }
@@ -1971,14 +2058,15 @@ async function recoverOrphanedRuns() {
 // background died mid-ML-call. Fail that run the same clean way.
 setMlAlarmRecoveryHook(async (entry, msg) => {
   try {
+    clearDiagLog(); // 1.4.0 (m6): alarm recovery log is its own.
     diagPush('alarm recovery run ' + entry.runId + ' type ' + entry.type + ' tab ' + entry.tabId);
-    await failOrphanedRun(entry.runId, { tabId: entry.tabId }, msg);
-    diagPush('alarm recovery error: ' + msg);
-    if (entry.tabId != null) await sendDiagLog(entry.tabId, entry.runId);
+    const sent = await failOrphanedRun(entry.runId, { tabId: entry.tabId }, msg);
+    if (sent) {
+      diagPush('alarm recovery error: ' + msg);
+      if (entry.tabId != null) await sendDiagLog(entry.tabId, entry.runId);
+    }
   } catch {}
 });
-if (typeof window !== 'undefined' && window.document) {
-  // Firefox background page only (see above). Fire-and-forget: never block
-  // background startup, never throw.
-  recoverOrphanedRuns().catch(() => {});
-}
+// 1.4.0 (m4): runs on both browsers now (see the FIX1 comment above).
+// Fire-and-forget: never block background startup, never throw.
+recoverOrphanedRuns().catch(() => {});

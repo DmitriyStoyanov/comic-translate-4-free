@@ -102,3 +102,15 @@ export async function idbDel(db, id) {
     tx.onabort = () => reject(tx.error || new DOMException('storage delete aborted', 'AbortError'));
   });
 }
+
+// 1.4.0 (m5): list every key in the models store. Used by
+// pixelPruneRun (shared/pixel-bus.js) to find a dead run's staged pixel
+// payloads after background death (the pipeline finally never ran).
+export async function idbKeys(db) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readonly');
+    const rq = tx.objectStore(IDB_STORE).getAllKeys();
+    rq.onsuccess = () => resolve(rq.result || []);
+    rq.onerror = () => reject(rq.error);
+  });
+}

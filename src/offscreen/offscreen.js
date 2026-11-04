@@ -109,18 +109,23 @@ async function loadBaberu(providers) {
   await baberu.loadStep(await modelBuffer('ocr-baberu-step-v12'), providers);
 }
 async function loadWithWebgpuFallback(kind, loadFn) {
-  // Try WebGPU alone; on creation failure, fall back to WASM once and
-  // remember it for this host lifetime. Throws only if WASM also fails.
+  // 1.4.0 (m2): NO in-worker WASM fallback. Try WebGPU alone; on
+  // creation failure, reset the group once (dispose any half-loaded
+  // WebGPU sessions, or they leak GPU resources) and THROW the original
+  // error, so the service worker downgrades to shared WASM and logs it
+  // truthfully as "gpu failed". The old in-worker fallback made the
+  // service worker log "gpu done" while WASM actually ran inside the
+  // GPU worker — and stacked WASM attempts on OOM (in-worker retry,
+  // then the service-worker retry). This branch only ever runs in the
+  // GPU worker realm (WEBGPU_KINDS is empty elsewhere), and the
+  // service-worker downgrade path already handles GPU failure cleanly.
   const providers = providersFor(kind);
   try {
     await loadFn(providers);
   } catch (e) {
     if (providers[0] !== 'webgpu') throw e;
-    webgpuDowngraded.add(kind);
-    // Dispose any half-loaded WebGPU sessions before the WASM retry,
-    // or they leak GPU resources (and a later load would mix providers).
     await resetGroup(kind);
-    try { await loadFn(['wasm']); } catch (e2) { await resetGroup(kind); throw e2; }
+    throw e;
   }
 }
 async function ensureModel(kind) {
@@ -323,16 +328,23 @@ const handlers = {
     }
     const job = { worker, pending: null, terminated: false };
     chromeGpuJobs.set(runId, job);
+    // 1.4.0 (m9): ready latency is measured so the panel log can tell
+    // slow-start GPU from missing GPU. The ready window is 15 s (was
+    // 5 s): a slow/cold start used to be marked "skipped", so GPU was
+    // never used and every run paid 5 s + WASM time.
+    let readyMs = 0;
+    const readyT0 = performance.now();
     try {
       await new Promise((resolve, reject) => {
         const to = setTimeout(() => {
-          reject(new Error('GPU_SKIPPED: GPU worker did not become ready'));
-        }, 5000);
+          reject(new Error('GPU_SKIPPED: GPU worker did not become ready after 15s'));
+        }, 15000);
         worker.onmessage = (e) => {
           const d = e && e.data;
           if (!d) return;
           if (d.type === 'ml-ready') {
             clearTimeout(to);
+            readyMs = Math.round(performance.now() - readyT0);
             worker.onmessage = (ev) => {
               const m = ev && ev.data;
               if (!m) return;
@@ -367,7 +379,7 @@ const handlers = {
           reject(e);
         }
       });
-      return { ok: true, results: (res && res.results) || [], ms: (res && res.ms) || 0, totalTiles: (res && res.totalTiles) || 0 };
+      return { ok: true, results: (res && res.results) || [], ms: (res && res.ms) || 0, totalTiles: (res && res.totalTiles) || 0, readyMs };
     } finally {
       // If cancel already deleted the job, this is a no-op (the worker is
       // already terminated). Otherwise terminate now: results are IDB
@@ -456,17 +468,13 @@ const handlers = {
           });
         } catch (e) {
           // OOM recovery: drop the inpainter (206MB, not needed for OCR)
-          // first to free memory. If Baberu is on WebGPU, downgrade it
-          // to WASM and reload (the WebGPU run blew the heap) — the
-          // downgrade sticks, so this model never retries WebGPU again
-          // this session. Retry this crop once.
+          // first to free memory, then retry this crop once. Baberu is
+          // WASM-only by design (1.3.4 Baberu hang on GPU), so there is
+          // deliberately no GPU downgrade path here — the old branch
+          // checking providersFor('ocr-baberu') for 'webgpu' could never
+          // run and was removed in 1.4.0 (m11).
           if (!isOom(e) || c._oomRetried) throw e;
           await resetGroup('inpaint');
-          if (providersFor('ocr-baberu')[0] === 'webgpu') {
-            webgpuDowngraded.add('ocr-baberu');
-            await baberu.reset();
-            await ensureModel('ocr-baberu');
-          }
           c._oomRetried = true;
           r = await baberu.ocrChunked(u8, c.width, c.height, {
             lang: sourceLang || 'ja',
