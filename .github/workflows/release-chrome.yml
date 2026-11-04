@@ -1,0 +1,44 @@
+name: Build Chrome release zip
+
+# Split from Firefox (2026-11-03): Chrome and Firefox have independent
+# versions and releases now. Chrome is 2.x (GPU speed line).
+# On every push to main: build the Chrome zip and upload it as a workflow
+# artifact, so a fresh Chrome zip always exists.
+# On every Chrome version tag push (v2.*): additionally attach the Chrome
+# zip to the GitHub Release, so users can download it without building.
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v2.*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build Chrome zip
+        run: ./build.sh chrome
+
+      - name: Upload Chrome zip as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chrome-zip-${{ github.sha }}
+          path: |
+            dist/*-chrome.zip
+          if-no-files-found: error
+
+      - name: Attach Chrome zip to the release
+        if: startsWith(github.ref, 'refs/tags/v2.')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*-chrome.zip
+          generate_release_notes: true

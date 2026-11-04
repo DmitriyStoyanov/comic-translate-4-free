@@ -1,0 +1,45 @@
+name: Build Firefox release zip
+
+# Split from Chrome (2026-11-03): Chrome and Firefox have independent
+# versions and releases now. Firefox stays 1.4.x (needed patches only).
+# On every push to main: build the Firefox zip and upload it as a workflow
+# artifact, so a fresh Firefox zip always exists.
+# On every Firefox version tag push (v1.4.*): additionally attach the
+# Firefox zip to the GitHub Release, so users can download it without
+# building.
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v1.4.*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build Firefox zip
+        run: ./build.sh firefox
+
+      - name: Upload Firefox zip as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firefox-zip-${{ github.sha }}
+          path: |
+            dist/*-firefox.zip
+          if-no-files-found: error
+
+      - name: Attach Firefox zip to the release
+        if: startsWith(github.ref, 'refs/tags/v1.4.')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*-firefox.zip
+          generate_release_notes: true
