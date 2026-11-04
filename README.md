@@ -121,7 +121,7 @@ If this extension is useful to you, consider supporting its development:
 - **One picture per page** for auto-translate (the page's main image). Use right-click → Send to translate others.
 - **Large sessions** — translating dozens of images in one session can crash the browser. Clear the page cache in Settings if this happens.
 - **Firefox** — models run in the background page (no offscreen documents), sharing memory with everything else. Restart the browser if you see "no available backend found".
-- **Firefox is slower than Chrome** — Firefox extensions cannot use shared memory for multi-threading (SharedArrayBuffer), so the image model runs on one CPU thread on Firefox, while Chrome runs it on multiple threads. This is a Firefox platform limit, not a bug in this extension, and it cannot be fixed from inside the extension (see [Mozilla bug 1673477](https://bugzilla.mozilla.org/show_bug.cgi?id=1673477)). A CPU-only multi-worker version that runs parts of inpainting in parallel is in progress.
+- **Firefox is slower than Chrome** — Firefox extensions cannot use shared memory for multi-threading (SharedArrayBuffer), so the model runs on one CPU thread. This is a Firefox platform limit, not an extension bug ([Mozilla bug 1673477](https://bugzilla.mozilla.org/show_bug.cgi?id=1673477)).
 - Google Translate uses the unofficial free endpoint and may be rate-limited.
 
 ---
