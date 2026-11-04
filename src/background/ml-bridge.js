@@ -1189,7 +1189,7 @@ export async function runChromeGpuInpaint(opts) {
       }, (e) => reject(e));
     });
     clearWatchdog();
-    return { results: (res && res.results) || [], ms: (res && res.ms) || 0, totalTiles: (res && res.totalTiles) || 0 };
+    return { results: (res && res.results) || [], ms: (res && res.ms) || 0, totalTiles: (res && res.totalTiles) || 0, readyMs: (res && res.readyMs) };
   } finally {
     clearWatchdog();
     if (activeChromeGpuJobs.get(runId) === job) activeChromeGpuJobs.delete(runId);
