@@ -52,6 +52,16 @@ Promise.all([
       self.postMessage({ callId: msg.callId, runId: msg.runId, ok: false, error: String((err && err.message) || err) });
     }
   };
+  // DIAGNOSTIC (temporary): log errors that escape the handler
+  // try/catch (async callbacks, device callbacks) as plain text, so
+  // the message survives even when the thrown value is an object the
+  // console cannot expand.
+  self.addEventListener('error', (ev) => {
+    try { console.error('[ct-worker] uncaught error:', String((ev && ev.message) || ev || '')); } catch {}
+  });
+  self.addEventListener('unhandledrejection', (ev) => {
+    try { console.error('[ct-worker] unhandled rejection:', String(((ev && ev.reason && ev.reason.message) || (ev && ev.reason) || ev || ''))); } catch {}
+  });
   self.postMessage({ type: 'ml-ready' });
 }).catch(() => {
   // Import failed (e.g. dynamic import unsupported): the page side falls

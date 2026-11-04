@@ -13,7 +13,7 @@ import { pixelPut, pixelTake, pixelDrop } from '../shared/pixel-bus.js';
 import { generateMask } from '../shared/mask.js';
 import { translateBlocks, checkAzure, checkLmStudio, BACKEND_LABEL, BACKEND_SHORT_LABEL } from './translators.js';
 import { detectPageLang } from '../shared/lang-detect.js';
-import { mlHostAlive, ensureMlHost, callMl, cancelMlForRun, makeCanvas, canvasToBlob, directHandlers, WEBP_TYPE, WEBP_QUALITY } from './ml-bridge.js';
+import { mlHostAlive, ensureMlHost, callMl, cancelMlForRun, makeCanvas, canvasToBlob, directHandlers, WEBP_TYPE, WEBP_QUALITY, setMlAlarmRecoveryHook } from './ml-bridge.js';
 import {
   initPageCache, buildCacheKey, buildCacheKeyTier1, buildCacheKeyTier2,
   pageCacheGet, pageCachePut,
@@ -24,7 +24,24 @@ import { baseDomain, displayHost, hostOf, isSiteAllowed, imageHostOrigins } from
 // Translated-page cache is session-scoped: initPageCache() wipes the store on
 // every browser startup (via a chrome.storage.session marker) and the
 // get/put/stats helpers await that check before touching the store.
+// DIAGNOSTIC (temporary): panel log buffer. The console does not work
+// for this user (pastes are samples, Objects cannot be opened), so the
+// log also goes to our own debug panel on the page, where it can be
+// copied in full. diagPush logs to console AND buffers (cap 200).
+// Defined here (before any use) so top-level calls cannot hit TDZ.
+const diagLogBuf = [];
+function diagPush(line) {
+  try {
+    console.error('[ct-diag] ' + line);
+    diagLogBuf.push('[ct-diag] ' + line);
+    if (diagLogBuf.length > 200) diagLogBuf.shift();
+  } catch {}
+}
 initPageCache();
+
+// DIAGNOSTIC (temporary): proves this build loaded, so a paste without
+// this line means the old build ran, not this diagnostic.
+diagPush('diagnostic loaded');
 
 // Content script path for scripting.executeScript.
 // Chrome: service worker, paths relative to extension root.
@@ -491,14 +508,163 @@ async function emitDebug(runId, tabId, settings, stage, payload) {
   } catch { /* content script not there yet or send hung */ }
 }
 
+// DIAGNOSTIC (temporary): send the panel log WITHOUT the debugMode
+// gate (emitDebug returns early when debugMode is off, so the user
+// would never see it). Same 5s race + swallow as emitDebug, plus
+// debug:true so the panel auto-shows and renders this tab at once.
+async function sendDiagLog(tabId, runId) {
+  try {
+    await Promise.race([
+      chrome.tabs.sendMessage(tabId, {
+        type: MSG.DEBUG_STAGE, runId, stage: 'diaglog',
+        payload: { title: 'Diagnostic log', log: diagLogBuf.join('\n') },
+        debug: true,
+      }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('sendDiagLog timeout')), 5000)),
+    ]);
+  } catch { /* content script not there yet or send hung */ }
+}
+
+// FIX1: persisted run records (Firefox background-death recovery).
+// The in-memory runs map dies with the background page, so a run in flight
+// when the background died would leave its pill frozen forever. A minimal
+// record per run lives in storage.local (already permitted; storage.session
+// availability on Firefox 115 is uncertain, so local is the safe choice).
+// Written on run start + on stage change only (not on every progress tick,
+// so a 100-tile inpaint costs ~8 writes, not 100+). Removed on run end
+// (finally) and by the alarm/orphan recovery paths. Best-effort: every
+// call is fire-and-forget and never throws into the pipeline. Single-run
+// assumption: concurrent runs share one map key, so two runs starting in
+// the same instant could clobber each other (read-modify-write); the
+// common case (one run at a time) is exact.
+const ACTIVE_RUNS_KEY = 'ct-active-runs';
+const persistedStageByRun = new Map(); // runId -> last stage written
+async function persistRunRecord(runId, tabId, stage) {
+  try {
+    const all = (await chrome.storage.local.get(ACTIVE_RUNS_KEY))[ACTIVE_RUNS_KEY] || {};
+    const prev = all[runId];
+    all[runId] = { tabId, stage, startedAt: (prev && prev.startedAt) || Date.now(), updatedAt: Date.now() };
+    await chrome.storage.local.set({ [ACTIVE_RUNS_KEY]: all });
+    persistedStageByRun.set(runId, stage);
+  } catch {}
+}
+async function clearRunRecord(runId) {
+  try {
+    const all = (await chrome.storage.local.get(ACTIVE_RUNS_KEY))[ACTIVE_RUNS_KEY] || {};
+    if (all[runId]) {
+      delete all[runId];
+      await chrome.storage.local.set({ [ACTIVE_RUNS_KEY]: all });
+    }
+    persistedStageByRun.delete(runId);
+  } catch {}
+}
+
+// FIX2: run-scoped keep-alive. Firefox MV3 background.page is a
+// non-persistent event page (MDN: `persistent` defaults to false in
+// MV3 and setting it true is an error; the page may be unloaded when
+// idle). Two runs in a row died mid-inpaint (~24s in) and were only
+// recovered by FIX1 — prevention is needed, with recovery staying as
+// backup. Two mechanisms, both opened on run start and closed in
+// runPipeline finally (success, failure, cancel), so they never hold
+// the background alive forever:
+// (1) A long-lived runtime Port held open for the run. An open port is
+// the standard event-page keep-alive: the page counts as active while
+// any port is open. Self-connect (background connects to itself) with
+// a top-level onConnect listener that accepts the keepalive name —
+// without a listener the port is invalid immediately.
+// (2) A periodic alarm (1 min) named ct-keepalive:<runId>. Each fire
+// dispatches an event (activity) and, if the page was unloaded anyway,
+// wakes a fresh page (which then runs FIX1 recovery instead of
+// freezing). ml-bridge's onAlarm ignores non-ct-ml: names, and this
+// listener ignores ct-ml: names, so neither interferes with ML alarms.
+// Neither mechanism touches ML, timers, or recovery paths.
+const keepAlivePorts = new Map(); // runId -> Port (outgoing end)
+const keepAliveIncoming = new Set(); // incoming ends, held so they are not GC'd
+function keepAliveStart(runId) {
+  try {
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.connect) {
+      const port = chrome.runtime.connect({ name: 'ct-keepalive' });
+      port.onDisconnect.addListener(() => {
+        keepAlivePorts.delete(runId);
+        diagPush('keepalive port disconnected run ' + runId);
+      });
+      keepAlivePorts.set(runId, port);
+      diagPush('keepalive started run ' + runId);
+    }
+  } catch {}
+  try {
+    if (typeof chrome !== 'undefined' && chrome.alarms) {
+      const p = chrome.alarms.create('ct-keepalive:' + runId, { periodInMinutes: 1 });
+      if (p && p.catch) p.catch(() => {});
+    }
+  } catch {}
+}
+function keepAliveStop(runId) {
+  try {
+    const port = keepAlivePorts.get(runId);
+    if (port) { try { port.disconnect(); } catch {} keepAlivePorts.delete(runId); }
+  } catch {}
+  try {
+    if (typeof chrome !== 'undefined' && chrome.alarms) {
+      const p = chrome.alarms.clear('ct-keepalive:' + runId);
+      if (p && p.catch) p.catch(() => {});
+    }
+  } catch {}
+}
+// FIX3: also accept the content-script-held keep-alive Port
+// (ct-keepalive-tab). FIX2's self-connect Port (both ends in the
+// background) did not prevent a third mid-inpaint death, so the hold
+// must come from a DIFFERENT context: the tab's content script, which
+// opens it on run-started and heartbeats every 20s. An open channel to
+// another context, with messages across it, is the documented activity
+// that keeps an event page / worker alive; a silent self-connect is
+// not. Held in keepAliveIncoming so it is not GC'd. Heartbeats are
+// activity only — never logged per-beat (that would flood the panel
+// log) and never touch runs or ML.
+if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onConnect) {
+  chrome.runtime.onConnect.addListener((port) => {
+    if (!port || (port.name !== 'ct-keepalive' && port.name !== 'ct-keepalive-tab')) return;
+    keepAliveIncoming.add(port);
+    diagPush('keepalive port connected name ' + port.name);
+    try { port.onMessage.addListener(() => { /* heartbeat activity only */ }); } catch {}
+    port.onDisconnect.addListener(() => { keepAliveIncoming.delete(port); diagPush('keepalive port disconnected name ' + port.name); });
+  });
+}
+if (typeof chrome !== 'undefined' && chrome.alarms && chrome.alarms.onAlarm) {
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (!alarm || !alarm.name || !alarm.name.startsWith('ct-keepalive:')) return;
+    // No-op: the dispatch itself is the activity signal. Never touch
+    // runs, ML, or recovery here.
+  });
+}
+
+// DIAGNOSTIC (temporary): count every failed progress send to the tab,
+// so the log shows the TRUE total (not a pasted sample) plus when the
+// tab last responded. Broadcast failures are not logged: the popup is
+// normally closed, so those failures are expected, not a signal.
+let diagProgressFails = 0;
+let diagProgressLastOk = 0;
 function setProgress(runId, stage, progress, extra = {}) {
   currentRun = { runId, stage, progress };
+  // FIX1: persist stage changes only (not every progress tick, and never
+  // 'done'/'cancelled' — the finally below clears the record anyway).
+  // Fire-and-forget: never blocks progress updates.
+  if (stage !== 'done' && stage !== 'cancelled' && persistedStageByRun.get(runId) !== stage) {
+    const t = runs.get(runId)?.tabId;
+    if (t != null) persistRunRecord(runId, t, stage);
+  }
   const payload = { type: MSG.RUN_PROGRESS, runId, stage, progress, ...extra };
   chrome.runtime.sendMessage(payload).catch(() => {});
   // Targeted copy for the tab's status pill (broadcasts reach every tab).
   const tabId = runs.get(runId)?.tabId;
   if (tabId != null) {
-    chrome.tabs.sendMessage(tabId, { ...payload, direct: true }).catch(() => {});
+    chrome.tabs.sendMessage(tabId, { ...payload, direct: true }).then(
+      () => { diagProgressLastOk = Date.now(); },
+      () => {
+        diagProgressFails++;
+        diagPush('progress send failed #' + diagProgressFails + ' run ' + runId + ' stage ' + stage + ' progress ' + progress + ' tab ' + tabId + ' lastOk ' + (diagProgressLastOk ? new Date(diagProgressLastOk).toISOString() : 'never'));
+      }
+    );
   }
 }
 
@@ -533,12 +699,23 @@ async function isIncognitoTab(tabId) {
 // extra.srcUrl names the exact <img> for the manual-send path; the auto
 // path omits it and the page replaces its detected main image.
 async function sendRender(tabId, runId, mode, imageDataUrl, w, h, blocks, timings, debug, extra = {}) {
-  const renderRes = await chrome.tabs.sendMessage(tabId, {
-    type: MSG.RENDER, runId, mode,
-    imageDataUrl, width: w, height: h,
-    blocks, timings, debug,
-    ...(extra.srcUrl ? { srcUrl: extra.srcUrl } : {}),
-  });
+  // DIAGNOSTIC (temporary): delivery is the decisive step — log the
+  // attempt, any send failure, and the reply, so the log shows whether
+  // the run finished inpaint and failed only at delivery.
+  diagPush('sendRender attempt run ' + runId + ' tab ' + tabId + ' mode ' + mode);
+  let renderRes;
+  try {
+    renderRes = await chrome.tabs.sendMessage(tabId, {
+      type: MSG.RENDER, runId, mode,
+      imageDataUrl, width: w, height: h,
+      blocks, timings, debug,
+      ...(extra.srcUrl ? { srcUrl: extra.srcUrl } : {}),
+    });
+  } catch (e) {
+    diagPush('sendRender send failed run ' + runId + ' tab ' + tabId + ': ' + String((e && e.message) || e));
+    throw e;
+  }
+  diagPush('sendRender reply run ' + runId + ' tab ' + tabId + ': ' + JSON.stringify(renderRes && { ok: renderRes.ok, replaced: renderRes.replaced, error: renderRes.error }));
   // Surface a content-side render failure instead of silently reporting
   // "done" while the original image is still on the page.
   if (!renderRes || renderRes.ok === false) {
@@ -645,6 +822,7 @@ async function runPipeline(tabId, opts = {}) {
   // a 50-block translate doesn't keep burning quota after the user cancelled.
   const abortController = new AbortController();
   runs.set(runId, { cancelled: false, tabId, abortController });
+  persistRunRecord(runId, tabId, 'capture'); // FIX1: see helpers above.
   const settings = await getSettings();
   const timings = {};
   const pipelineT0 = performance.now(); // overall wall-clock for this run
@@ -656,6 +834,7 @@ async function runPipeline(tabId, opts = {}) {
   const pxKeys = []; // IDB pixel-bus keys created this run; dropped in finally
   let result;
   try {
+    keepAliveStart(runId); // FIX2: hold the background alive for this run only; released in finally.
     // Inject the overlay early so debug-stage payloads have a panel to land in.
     // content.js guards against double-injection; the canvas stays empty until render.
     // Gate on the host permission first: without it injection always fails, and
@@ -992,6 +1171,7 @@ async function runPipeline(tabId, opts = {}) {
       const inpainted = new Uint8ClampedArray(rgba);
       let inpaintMs = 0;
       if (patches.length) {
+        diagPush('inpaint start run ' + runId + ' patches ' + patches.length);
         const r = await callMlChecked(runId, {
           type: MSG.ML_INPAINT, runId,
           patches: patches.map(({ id, key, maskKey, width, height }) => ({ id, key, maskKey, width, height })),
@@ -1222,12 +1402,20 @@ async function runPipeline(tabId, opts = {}) {
         await emitDebug(runId, tabId, settings, 'error', { title: 'Error', error: msg });
       } catch { /* ignore */ }
     }
+    // DIAGNOSTIC (temporary): one self-contained summary line, so ANY
+    // paste containing it shows the true totals and the outcome.
+    diagPush('run ended run ' + runId + ' ok false error ' + msg + ' progressSendFails ' + diagProgressFails + ' lastProgress ' + (currentRun ? currentRun.stage + ' ' + currentRun.progress : 'none'));
+    // DIAGNOSTIC (temporary): send AFTER the summary is pushed, so the
+    // panel log includes it. Error runs only (not user cancels).
+    if (!quietCancel) await sendDiagLog(tabId, runId);
     result = { runId, ok: false, error: msg, cancelled: !!quietCancel,
       ...(e && e.fallbackUrl ? { fallbackUrl: e.fallbackUrl } : {}) };
   } finally {
     runs.delete(runId);
+    clearRunRecord(runId); // FIX1: run ended, drop its persisted record.
     // Drop any pixel payloads this run staged but never got taken.
     for (const k of pxKeys) await pixelDrop(k);
+    keepAliveStop(runId); // FIX2: release the run-scoped hold last, after all cleanup.
   }
   return result;
 }
@@ -1296,6 +1484,13 @@ chrome.runtime.onInstalled.addListener(details => {
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  // DIAGNOSTIC (temporary): log every document change for a tab with a
+  // run in flight, so the log proves or refutes a mid-run navigation
+  // without asking the user.
+  try {
+    const inFlight = [...runs].some(([, r]) => r.tabId === tabId && !r.cancelled);
+    if (inFlight) diagPush('tab updated tab ' + tabId + ' status ' + (changeInfo && changeInfo.status) + ' url ' + (changeInfo && changeInfo.url ? changeInfo.url : '(same url)') + ' at ' + new Date().toISOString());
+  } catch {}
   if (!changeInfo || changeInfo.status !== 'complete') return;
   (async () => {
     try {
@@ -1592,3 +1787,64 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   })();
   return true;
 });
+
+// FIX1: orphan + alarm recovery (Firefox background page only).
+// Runs once when this background page loads. If a previous background died
+// mid-run, its persisted record is still in storage (the in-memory runs map
+// died with it). Failing it cleanly here unfreezes the pill and shows the
+// panel log, instead of leaving the pill frozen at the last progress.
+// Gated to background pages (window.document exists): Chrome service
+// workers restart often and already have the alarm backup, so they skip
+// this to avoid double-failing a run the alarm already handled.
+async function failOrphanedRun(orphanRunId, rec, msg) {
+  // Remove first: never fail the same orphan twice (e.g., if this
+  // background restarts again mid-recovery).
+  await clearRunRecord(orphanRunId);
+  // FIX2: a recovered orphan's repeating keepalive alarm must not fire
+  // forever — clear it here (finally never ran for this run). Best-effort.
+  try {
+    if (typeof chrome !== 'undefined' && chrome.alarms) {
+      const p = chrome.alarms.clear('ct-keepalive:' + orphanRunId);
+      if (p && p.catch) p.catch(() => {});
+    }
+  } catch {}
+  if (rec.tabId == null) return;
+  const tab = await chrome.tabs.get(rec.tabId).catch(() => null);
+  if (!tab) return;
+  try { await chrome.scripting.executeScript({ target: { tabId: rec.tabId }, files: CONTENT_SCRIPT_FILES }); } catch {}
+  // RUN_STARTED first: it sets the tab's current run to this runId, so the
+  // error + panel log below are not rejected as stale.
+  try { await chrome.tabs.sendMessage(rec.tabId, { type: MSG.RUN_STARTED, runId: orphanRunId }); } catch {}
+  try { await chrome.tabs.sendMessage(rec.tabId, { type: MSG.RUN_PROGRESS, runId: orphanRunId, stage: 'error', error: msg, direct: true }); } catch {}
+}
+async function recoverOrphanedRuns() {
+  try {
+    const all = (await chrome.storage.local.get(ACTIVE_RUNS_KEY))[ACTIVE_RUNS_KEY] || {};
+    for (const orphanRunId of Object.keys(all)) {
+      const rec = all[orphanRunId];
+      try {
+        const msg = 'Translation stopped because the background restarted while it was at stage ' + (rec.stage || 'unknown') + ' — please run translate again. (The detailed log from before the restart was in memory only and is lost.)';
+        diagPush('orphan recovery run ' + orphanRunId + ' tab ' + rec.tabId + ' died at stage ' + (rec.stage || 'unknown') + ' started ' + (rec.startedAt ? new Date(rec.startedAt).toISOString() : 'unknown') + ' lastStageUpdate ' + (rec.updatedAt ? new Date(rec.updatedAt).toISOString() : 'unknown'));
+        await failOrphanedRun(orphanRunId, rec, msg);
+        diagPush('orphan error: ' + msg);
+        if (rec.tabId != null) await sendDiagLog(rec.tabId, orphanRunId);
+        diagPush('orphan recovery done run ' + orphanRunId);
+      } catch {}
+    }
+  } catch {}
+}
+// Alarm recovery hook (ml-bridge onAlarm): the alarm fired because the
+// background died mid-ML-call. Fail that run the same clean way.
+setMlAlarmRecoveryHook(async (entry, msg) => {
+  try {
+    diagPush('alarm recovery run ' + entry.runId + ' type ' + entry.type + ' tab ' + entry.tabId);
+    await failOrphanedRun(entry.runId, { tabId: entry.tabId }, msg);
+    diagPush('alarm recovery error: ' + msg);
+    if (entry.tabId != null) await sendDiagLog(entry.tabId, entry.runId);
+  } catch {}
+});
+if (typeof window !== 'undefined' && window.document) {
+  // Firefox background page only (see above). Fire-and-forget: never block
+  // background startup, never throw.
+  recoverOrphanedRuns().catch(() => {});
+}

@@ -563,9 +563,61 @@
 
   // ------------------------------------------------------------ overlay DOM
   let overlay = null, debugPanel = null, debugBody = null, dbgBtn = null, debugStatus = null;  const stageTabs = {};   // stage -> payload
-  const stageOrder = ['capture', 'detect', 'blocks', 'ocr', 'mask', 'inpaint', 'translate', 'render'];
+  const stageOrder = ['capture', 'detect', 'blocks', 'ocr', 'mask', 'inpaint', 'translate', 'render', 'diaglog'];
   let currentRunId = null;
   let latestRunId = null;   // run the service worker last started for this tab
+
+  // FIX3: content-script-held keep-alive Port. FIX2's self-connect Port
+  // (both ends in the background) did not prevent the background dying
+  // mid-run — a third run died at inpaint the same way. A Port whose
+  // opener lives in a DIFFERENT context (this tab's content script) is
+  // the documented keep-alive: an event page / worker stays alive while
+  // it has an open channel to another context, and messages across it
+  // count as activity resetting the idle timer (mere open, with no
+  // messages, does not reliably reset timers on modern Chromium, and
+  // Firefox likewise stays alive while the background "is doing
+  // something periodically"). So this port also sends a heartbeat every
+  // 20s while a run is active. Held in module scope so it is not GC'd.
+  // Page unload disconnects it automatically, which is fine: the run
+  // ends on navigation anyway. Best-effort everywhere; never throws.
+  let tabKeepAlivePort = null;
+  let tabKeepAliveRunId = null;
+  let tabKeepAliveTimer = null;
+  function openTabKeepAlive(runId) {
+    try {
+      if (tabKeepAlivePort && tabKeepAliveRunId === runId) return;
+      closeTabKeepAlive();
+      if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.connect) return;
+      const port = chrome.runtime.connect({ name: 'ct-keepalive-tab' });
+      port.onDisconnect.addListener(() => {
+        if (tabKeepAlivePort === port) {
+          tabKeepAlivePort = null;
+          tabKeepAliveRunId = null;
+          if (tabKeepAliveTimer) { clearInterval(tabKeepAliveTimer); tabKeepAliveTimer = null; }
+        }
+      });
+      tabKeepAlivePort = port;
+      tabKeepAliveRunId = runId;
+      // Heartbeat: a silent open port alone does not reliably reset idle
+      // timers. One small message every 20s (under the ~30s idle clock)
+      // is the activity that keeps the background alive during long runs.
+      tabKeepAliveTimer = setInterval(() => {
+        try {
+          if (tabKeepAlivePort) tabKeepAlivePort.postMessage({ type: 'ct-keepalive-tab', runId: tabKeepAliveRunId });
+          else if (tabKeepAliveTimer) { clearInterval(tabKeepAliveTimer); tabKeepAliveTimer = null; }
+        } catch { closeTabKeepAlive(); }
+      }, 20000);
+    } catch { closeTabKeepAlive(); }
+  }
+  function closeTabKeepAlive(runId) {
+    try {
+      if (runId && tabKeepAliveRunId && tabKeepAliveRunId !== runId) return;
+      if (tabKeepAliveTimer) { clearInterval(tabKeepAliveTimer); tabKeepAliveTimer = null; }
+      if (tabKeepAlivePort) { try { tabKeepAlivePort.disconnect(); } catch {} }
+    } catch {}
+    tabKeepAlivePort = null;
+    tabKeepAliveRunId = null;
+  }
 
   function ensureOverlay() {
     if (overlay) return;
@@ -641,6 +693,7 @@
     const p = stageTabs[stage];
     if (!p) { debugBody.innerHTML = `<p style="color:#888">no data for "${esc(stage)}" yet</p>`; return; }
     let html = `<h3 style="margin:0 0 8px">${esc(p.title || stage)}</h3>`;
+    if (p.log) html += `<pre style="white-space:pre-wrap;word-break:break-all;color:#ddd;font:11px monospace;max-height:60vh;overflow:auto;border:1px solid #444;padding:8px">${esc(p.log)}</pre>`;
     if (p.totalMs != null) {
       html += `<p style="color:#eee;font-size:14px;margin:0 0 4px">total: <b>${p.totalMs}ms</b>`;
       if (p.seqMs != null && p.seqMs > p.totalMs) {
@@ -759,6 +812,8 @@
     if (msg.type === 'ct/run-progress') {
       if (!msg.direct) return false; // broadcasts are for the popup; the pill takes targeted copies
       const st = msg.stage;
+      // FIX3: terminal progress ends the run — release the tab-held keep-alive.
+      if (st === 'error' || st === 'done' || st === 'cancelled') closeTabKeepAlive(msg.runId);
       if (st === 'error') showPillError(msg.error || stageLabel('error'),
         msg.grantHost ? { host: msg.grantHost, label: msg.grantLabel } : null);
       else if (st === 'done') { showPill('comic-translate-4-free — ' + esc(stageLabel('done')) + ' ✓' + (msg.cached ? ' (from cache)' : msg.backendLabel ? ' (' + esc(msg.backendLabel) + ')' : '')); maybeDing(); }
@@ -771,6 +826,7 @@
       // from any older run (a page the user already left) are ignored — they
       // must never touch this page's DOM.
       latestRunId = msg.runId;
+      openTabKeepAlive(msg.runId); // FIX3: tab-held keep-alive for this run.
       // Clear stale original-image markers from a previous run (SPA
       // navigation can leave them behind; a new run must not resolve
       // against the old page's stashed URLs). allImages() also descends
@@ -898,6 +954,7 @@
             renderDebugTab('render');
           }
           sendResponse({ ok: true, replaced });
+          closeTabKeepAlive(msg.runId); // FIX3: render done, run over.
         } catch (e) {
           sendResponse({ ok: false, error: String((e && e.message) || e) });
         }

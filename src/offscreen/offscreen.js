@@ -365,6 +365,9 @@ const handlers = {
     throwIfCancelled(runId);
     const t0 = performance.now();
     const results = [];
+    // DIAGNOSTIC (temporary): total work, so the log shows how many
+    // patches the run had (not a guessed count).
+    console.error('[ct-diag] inpaint start run ' + runId + ' patches ' + patches.length);
     // Long inpaints report progress: the Firefox background page sets
     // globalThis.__ctInpaintProgress (same module scope there — see
     // background-ff.js/service-worker.js). The Chrome offscreen document sets

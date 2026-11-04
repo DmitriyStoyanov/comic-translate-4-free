@@ -83,6 +83,11 @@ const ML_GROUP_FOR_TYPE = {
 const OOM_RE = /out of memory|no available backend|aborted\s*\(/i;
 function mlHostError(type, raw) {
   const m = String((raw && raw.message) || raw || '');
+  // DIAGNOSTIC (temporary): print the FULL message as plain text. The
+  // user-facing error below truncates to 160 chars, and thrown objects
+  // cannot be expanded in the console, so without this line the cause
+  // is unreadable. Keep this log in the real fix too.
+  console.error('[ct] ML failure:', m);
   if (OOM_RE.test(m)) {
     const group = ML_GROUP_FOR_TYPE[type] || 'translation engine';
     // Both browsers run ML off the main thread now (Chrome offscreen
@@ -206,8 +211,11 @@ function ensureMlWorker() {
         settled = true;
         clearTimeout(to);
         w.onmessage = routeMlMessage;
-        w.onerror = () => {
+        w.onerror = (ev) => {
           if (mlWorker !== w) return; // stale worker (already replaced)
+          // DIAGNOSTIC (temporary): log the worker error as plain text
+          // (the event object itself cannot be expanded usefully).
+          console.error('[ct] ML worker error:', String((ev && ev.message) || ev || ''));
           // Mid-run crash: fall back to in-process handlers — re-running
           // from the still-staged originals is safe.
           failMlPending(mlWorkerFallbackError);
@@ -217,10 +225,11 @@ function ensureMlWorker() {
       }
       // Any other pre-ready message is ignored (no job posts before ready).
     };
-    w.onerror = () => {
+    w.onerror = (ev) => {
       if (settled) return;
       settled = true;
       clearTimeout(to);
+      console.error('[ct] ML worker error before ready:', String((ev && ev.message) || ev || ''));
       killMlWorker();
       reject(mlWorkerFallbackError());
     };
@@ -333,12 +342,27 @@ export function cancelMlForRun(runId) {
   }
 }
 
+// FIX1: alarm-recovery hook. service-worker.js registers a handler that
+// fails the run cleanly to the tab (pill error + panel log) and clears the
+// persisted run record. When no hook is set, the onAlarm listener keeps
+// its legacy behavior (pill error + ML host restart).
+let mlAlarmRecoveryHook = null;
+export function setMlAlarmRecoveryHook(fn) {
+  mlAlarmRecoveryHook = (typeof fn === 'function') ? fn : null;
+}
+
 // Call one ML_* handler. Mirrors the old callOffscreen contract: resolves
 // with the handler's payload, throws a human message on failure.
 export async function callMl(msg, opts = {}) {
   const timeoutMs = ML_TIMEOUT_MS[msg.type] || ML_TIMEOUT_DEFAULT_MS;
   const attempt = nextAttempt(msg);
   const effMsg = attempt > 1 ? { ...msg, attempt } : msg;
+  // FIX1: the note below is outdated. This backup now also serves Firefox
+  // (a 6-minute inpaint freeze proved the background page can die or stall
+  // with its timers), wherever chrome.alarms exists. It is inert on Firefox
+  // until the "alarms" permission is added to manifest.firefox.json — that
+  // permission is the blocker, not the code. The onAlarm listener below
+  // calls the pipeline recovery hook when one is registered.
   // Alarm backup (Chrome only: chrome.alarms exists only with the "alarms"
   // permission, which only the Chrome manifest declares — Firefox's
   // persistent background page never loses its timers, so it needs none).
@@ -369,6 +393,9 @@ export async function callMl(msg, opts = {}) {
     timer = setTimeout(() => {
       // Stop the runaway op first: without this it keeps running past the
       // race and could complete late (stale pixelPut, double resource use).
+      // DIAGNOSTIC (temporary): proves whether the timeout ever fired —
+      // a silent stall with no timeout line means the timeout died too.
+      console.error('[ct-diag] ML timeout fired type ' + msg.type + ' run ' + msg.runId + ' after ' + (timeoutMs / 1000) + 's');
       cancelMlRun(msg.runId);
       const group = ML_GROUP_FOR_TYPE[msg.type] || 'ML';
       const err = new Error(`ML host timed out during ${group} after ${timeoutMs / 1000}s — the ML thread was restarted automatically. Try again.`);
@@ -417,6 +444,13 @@ if (typeof chrome !== 'undefined' && chrome.alarms && chrome.alarms.onAlarm) {
     try { await chrome.storage.local.remove(key); } catch {}
     const group = ML_GROUP_FOR_TYPE[entry.type] || 'ML';
     const msg = `ML host timed out during ${group} after ${entry.timeoutMs / 1000}s — the ML thread was restarted automatically. Try again.`;
+    // FIX1: pipeline-owned recovery first. When set, the pipeline fails
+    // the run cleanly (pill + panel log + run-record cleanup) and the
+    // legacy pill/restart below is skipped.
+    if (mlAlarmRecoveryHook) {
+      try { await mlAlarmRecoveryHook(entry, msg); } catch {}
+      return;
+    }
     if (entry.tabId != null) {
       try {
         await chrome.tabs.sendMessage(entry.tabId, { type: MSG.RUN_PROGRESS, runId: entry.runId, stage: 'error', error: msg, direct: true });
