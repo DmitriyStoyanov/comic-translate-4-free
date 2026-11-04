@@ -52,7 +52,7 @@ comic-translate-4-free translates manga and comic pages automatically as you bro
 
 ### 🔒 Privacy
 
-- **The AI runs on your machine.** Bubble detection, OCR, and inpainting all execute locally in your browser via WebAssembly. Your pages never leave your device.
+- **The AI runs on your machine.** Bubble detection, OCR, and inpainting all run locally in your browser. Detection and OCR run via WebAssembly. Inpainting runs on GPU on Chrome (with WebAssembly fallback), and via WebAssembly on Firefox. Your pages never leave your device.
 - **Only translated text is sent out** — just the extracted strings go to the translation service you choose (Google / Azure / your local LM Studio).
 - **No account, no tracking, no telemetry.** All settings and cached models stay in your browser's local storage.
 

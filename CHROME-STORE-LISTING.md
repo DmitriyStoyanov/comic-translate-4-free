@@ -26,9 +26,10 @@ in place — speech bubbles filled with your language, nothing to click.
 
 **Privacy-first: the AI runs on your machine**
 
-Bubble detection, OCR, and inpainting all run locally in your browser via
-WebAssembly — your pages never leave your device. Only the extracted text
-is sent to the translation service you choose.
+Bubble detection and OCR run locally in your browser via WebAssembly, and
+inpainting runs on your GPU (with WebAssembly fallback) — your pages never
+leave your device. Only the extracted text is sent to the translation
+service you choose.
 
 **Features**
 
