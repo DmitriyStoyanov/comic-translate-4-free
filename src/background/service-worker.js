@@ -13,7 +13,7 @@ import { pixelPut, pixelTake, pixelDrop } from '../shared/pixel-bus.js';
 import { generateMask } from '../shared/mask.js';
 import { translateBlocks, checkAzure, checkLmStudio, BACKEND_LABEL, BACKEND_SHORT_LABEL } from './translators.js';
 import { detectPageLang } from '../shared/lang-detect.js';
-import { mlHostAlive, ensureMlHost, callMl, cancelMlForRun, makeCanvas, canvasToBlob, directHandlers, WEBP_TYPE, WEBP_QUALITY, setMlAlarmRecoveryHook } from './ml-bridge.js';
+import { mlHostAlive, ensureMlHost, callMl, cancelMlForRun, runPooledInpaint, cancelPooledInpaint, runGpuInpaint, cancelGpuInpaint, runChromeGpuInpaint, cancelChromeGpuInpaint, notifyChromeGpuProgress, makeCanvas, canvasToBlob, directHandlers, WEBP_TYPE, WEBP_QUALITY, setMlAlarmRecoveryHook } from './ml-bridge.js';
 import {
   initPageCache, buildCacheKey, buildCacheKeyTier1, buildCacheKeyTier2,
   pageCacheGet, pageCachePut,
@@ -137,6 +137,18 @@ function abortRunResources(id, r) {
   // flag is broadcast to every host, and the worker is terminated when
   // no other run shares it.
   try { cancelMlForRun(id); } catch {}
+  // POOL1: pool workers are separate Worker instances, not covered by
+  // cancelMlForRun's shared-worker broadcast — terminate them too.
+  try { cancelPooledInpaint(id); } catch {}
+  // GPU1: the GPU worker is likewise a separate Worker instance, not
+  // covered by cancelMlForRun's shared-worker broadcast — terminate
+  // it too (reclaims GPU buffers; cancel never falls back to WASM).
+  try { cancelGpuInpaint(id); } catch {}
+  // GPU1-Chrome: the Chrome GPU worker is owned by the offscreen
+  // document, not by this worker — terminate it too (ML_GPU_CANCEL to
+  // the doc, plus the ML_CANCEL broadcast below, which the doc also
+  // terminates on; both are idempotent).
+  try { cancelChromeGpuInpaint(id); } catch {}
 }
 
 async function cancelRunsForTab(tabId) {
@@ -835,6 +847,20 @@ async function runPipeline(tabId, opts = {}) {
   let result;
   try {
     keepAliveStart(runId); // FIX2: hold the background alive for this run only; released in finally.
+    // MEASURE1: thread-info diagnostic (best-effort, never fails the run).
+    // Served by the same ML host as compute (worker on Firefox, offscreen
+    // doc on Chrome — see ML_WORKER_TYPES in ml-bridge.js), so the numbers
+    // describe the realm actually running WASM, not the background page.
+    try {
+      const d = await callMl({ type: MSG.ML_DIAG, runId }, { tabId });
+      diagPush('thread-info context ' + (d && d.context != null ? d.context : 'unknown')
+        + ' sharedArrayBuffer ' + (d && d.sharedArrayBuffer ? 'yes' : 'no')
+        + ' crossOriginIsolated ' + (d && d.crossOriginIsolated != null ? String(d.crossOriginIsolated) : 'unknown')
+        + ' hardwareConcurrency ' + (d && d.hardwareConcurrency != null ? d.hardwareConcurrency : 'unknown')
+        + ' numThreads ' + (d && d.numThreads != null ? d.numThreads : 'unknown'));
+    } catch (e) {
+      diagPush('thread-info failed: ' + String((e && e.message) || e).slice(0, 120));
+    }
     // Inject the overlay early so debug-stage payloads have a panel to land in.
     // content.js guards against double-injection; the canvas stays empty until render.
     // Gate on the host permission first: without it injection always fails, and
@@ -1170,13 +1196,112 @@ async function runPipeline(tabId, opts = {}) {
       }
       const inpainted = new Uint8ClampedArray(rgba);
       let inpaintMs = 0;
+      // GPU1 per-run downgrade: set on any GPU failure (error or hang),
+      // so GPU is never retried again in THIS run. Next run tries GPU
+      // fresh (per-run stick only, per spec). Local to runPipeline, so
+      // it dies with the run in finally (runs.delete(runId)).
+      let gpuDowngradedThisRun = false;
       if (patches.length) {
         diagPush('inpaint start run ' + runId + ' patches ' + patches.length);
-        const r = await callMlChecked(runId, {
-          type: MSG.ML_INPAINT, runId,
-          patches: patches.map(({ id, key, maskKey, width, height }) => ({ id, key, maskKey, width, height })),
-        });
+        const wirePatches = patches.map(({ id, key, maskKey, width, height }) => ({ id, key, maskKey, width, height }));
+        let r;
+        // GPU1 (Firefox only): LaMa on WebGPU in a dedicated worker,
+        // tried first when the browser exposes WebGPU. Any GPU failure
+        // except user cancel (error, buffer error, OOM, or a hang
+        // caught by the 60s inactivity watchdog in ml-bridge.js)
+        // downgrades to WASM and retries once via the preloaded shared
+        // worker, then sticks to WASM for the rest of this run. The
+        // full error text is logged (no cut) so the panel log shows
+        // exactly how GPU died. Cancelled runs never fall back:
+        // checkCancelled throws before the downgrade. Chrome takes
+        // the GPU1-Chrome branch below (offscreen-document GPU worker).
+        // If WebGPU is not exposed, one line explains why GPU was
+        // skipped, so a missing navigator.gpu is visible, not silent.
+        if (directHandlers() && !gpuDowngradedThisRun && !(typeof navigator !== 'undefined' && navigator.gpu)) {
+          diagPush('inpaint gpu skipped: no navigator.gpu, using WASM/pool path');
+        }
+        if (directHandlers() && !gpuDowngradedThisRun && typeof navigator !== 'undefined' && navigator.gpu) {
+          try {
+            diagPush('inpaint gpu start run ' + runId + ' patches ' + patches.length);
+            r = await runGpuInpaint({
+              runId, patches: wirePatches,
+              onProgress: (frac) => parProgress('inpaint', frac),
+              diag: diagPush,
+              isCancelled: () => runs.get(runId)?.cancelled === true,
+            });
+            diagPush('inpaint gpu done ms ' + r.ms + ' totalTiles ' + (r.totalTiles || 0));
+          } catch (e) {
+            checkCancelled(runId);
+            gpuDowngradedThisRun = true;
+            diagPush('inpaint gpu failed, downgrading to WASM for this run: ' + String((e && e.message) || e));
+            r = await callMlChecked(runId, { type: MSG.ML_INPAINT, runId, patches: wirePatches });
+            diagPush('inpaint gpu WASM retry done ms ' + r.ms + ' totalTiles ' + (r.totalTiles || 0));
+          }
+        } else if (!directHandlers() && !gpuDowngradedThisRun) {
+        // GPU1-Chrome: LaMa on WebGPU in a dedicated worker spawned by
+        // the offscreen document (the SW cannot spawn workers). Tried
+        // first on Chrome; the document decides GPU availability in its
+        // own realm (its navigator.gpu, not the SW's). Any GPU failure
+        // except user cancel (error or a hang caught by the 60s
+        // inactivity watchdog in ml-bridge.js) downgrades to WASM and
+        // retries once via the offscreen document, then sticks to WASM
+        // for the rest of this run. GPU_SKIPPED (no navigator.gpu in
+        // the doc realm, worker creation/ready failure) logs "skipped"
+        // and falls back to the single WASM path. Full error text is
+        // logged (no cut). Cancelled runs never fall back:
+        // checkCancelled throws before the downgrade.
+          try {
+            diagPush('inpaint gpu start run ' + runId + ' patches ' + patches.length);
+            r = await runChromeGpuInpaint({
+              runId, patches: wirePatches,
+              onProgress: (frac) => parProgress('inpaint', frac),
+              diag: diagPush,
+              isCancelled: () => runs.get(runId)?.cancelled === true,
+            });
+            diagPush('inpaint gpu done ms ' + r.ms + ' totalTiles ' + (r.totalTiles || 0));
+          } catch (e) {
+            checkCancelled(runId);
+            if (e && e.gpuSkipped) {
+              diagPush('inpaint gpu skipped: ' + String((e && e.message) || e));
+              r = await callMlChecked(runId, { type: MSG.ML_INPAINT, runId, patches: wirePatches });
+            } else {
+              gpuDowngradedThisRun = true;
+              diagPush('inpaint gpu failed, downgrading to WASM for this run: ' + String((e && e.message) || e));
+              r = await callMlChecked(runId, { type: MSG.ML_INPAINT, runId, patches: wirePatches });
+              diagPush('inpaint gpu WASM retry done ms ' + r.ms + ' totalTiles ' + (r.totalTiles || 0));
+            }
+          }
+        } else if (directHandlers() && patches.length >= 2) {
+        // POOL1 (Firefox only): two dedicated ML workers, one per patch
+        // group, each running the existing sequential handler loop over
+        // its subset. Chrome keeps the single path (offscreen document).
+        // Pool creation failure falls back to the single call, exactly
+        // today's behavior; a group failure after creation fails the
+        // run cleanly (no partial page). Cancelled runs never fall back.
+          try {
+            r = await runPooledInpaint({
+              runId, patches: wirePatches,
+              onProgress: (frac) => parProgress('inpaint', frac),
+              diag: diagPush,
+              isCancelled: () => runs.get(runId)?.cancelled === true,
+            });
+            diagPush('inpaint pool done ms ' + r.ms + ' totalTiles ' + (r.totalTiles || 0));
+          } catch (e) {
+            checkCancelled(runId);
+            if (e && e.poolCreationFailed) {
+              diagPush('inpaint pool creation failed, falling back to single: ' + String((e && e.message) || e).slice(0, 120));
+              r = await callMlChecked(runId, { type: MSG.ML_INPAINT, runId, patches: wirePatches });
+            } else throw e;
+          }
+        } else {
+          r = await callMlChecked(runId, {
+            type: MSG.ML_INPAINT, runId,
+            patches: wirePatches,
+          });
+        }
         inpaintMs = r.ms;
+        // MEASURE1: tile shape of this page, from the handler's count.
+        if (r && typeof r.totalTiles === 'number') diagPush('inpaint tiles total ' + r.totalTiles + ' patches ' + patches.length);
         for (const res of r.results) {
           const p = patches[res.id];
           pxKeys.push(res.key);
@@ -1376,6 +1501,12 @@ async function runPipeline(tabId, opts = {}) {
       console.warn('[ct] page-cache write failed:', String((e && e.message) || e).slice(0, 120));
     }
     setProgress(runId, 'done', 1, { backendLabel: BACKEND_SHORT_LABEL[blocks?.[0]?.backendUsed || settings.translationBackend] || settings.translationBackend });
+    // MEASURE1 diagnostic only: also send the panel log on SUCCESS, so
+    // the thread-info and tile lines are copyable after a good run, not
+    // only on failure. Error runs still send from the catch below (this
+    // line never runs on that path), and cancelled runs throw before
+    // reaching here, so there is no duplicate and no quiet-cancel leak.
+    await sendDiagLog(tabId, runId);
     result = { runId, ok: true };
   } catch (e) {
     let msg;
@@ -1672,6 +1803,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const r = runs.get(msg.runId);
       if (r && typeof r.onInpaintProgress === 'function') r.onInpaintProgress(msg.frac);
     } catch { /* progress must never break the pipeline */ }
+    // GPU1-Chrome: the same progress re-arms the SW-side GPU watchdog
+    // in ml-bridge.js (progress resets the 60s inactivity window).
+    try { notifyChromeGpuProgress(msg.runId, msg.frac); } catch {}
     return false;
   }
   // Pill "Allow <host>" button (content script). permissions.request() must be

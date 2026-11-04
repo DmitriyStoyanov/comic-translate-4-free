@@ -8,7 +8,7 @@ import { ALL_FILES, downloadFileToIdb, readChunked, ocrEngineForLang, BABERU_VOC
 import { Detector } from './ml/detector.js';
 import { BaberuOCR } from './ml/baberu.js';
 import { meanBrightness } from '../shared/image-ops.js';
-import { Inpainter } from './ml/inpaint.js';
+import { Inpainter, tileOrigins } from './ml/inpaint.js';
 import { pixelPut, pixelPeek } from '../shared/pixel-bus.js';
 
 // Worker-safe: a Firefox inpaint worker imports this module, and a worker
@@ -74,12 +74,25 @@ async function assetText(path) {
 // throws no error, so no error-only fallback can catch it — only a
 // hang watchdog (per-run timeout + downgrade + retry) could, and no
 // watchdog can be verified here (no GPU in this VM), so no more GPU
-// guesses. The fallback machinery below stays (dead while this set
-// is empty) for a future watchdog attempt. The WebGPU addon scripts
-// and asyncify files are NOT shipped in 1.3.7, so no GPU code loads
-// at all. 1.3.7 is 1.2.11's proven WASM behavior plus the 1.3.1
-// pixel-peek fix and the 1.3.4 release() fix — working at CPU speed.
-const WEBGPU_KINDS = new Set([]);
+// guesses. 1.3.7 shipped no GPU code at all.
+// GPU1 RETURN (LaMa only, dedicated GPU worker realm only): the
+// missing pieces from 1.3.6 are now built — a background-side hang
+// watchdog (ml-bridge.js runGpuInpaint, 60s no-progress), a separate
+// GPU worker realm (ml-gpu-worker.js, terminated to reclaim GPU
+// buffers), FIX1 recovery, keep-alives, and the panel log, so a GPU
+// failure is observed in full and fails cleanly instead of freezing.
+// Detector stays WASM-only (it hardcodes ['wasm'] below), Baberu
+// stays WASM-only ('ocr-baberu' is never in this set). Only LaMa
+// inpaint ever touches GPU, and only in the GPU worker realm: the
+// flag below is set by ml-gpu-worker.js before importing this module,
+// and unset everywhere else (shared worker, background page,
+// offscreen document), where this set stays empty and all models
+// stay WASM. Chrome GPU1: the offscreen document spawns the GPU worker
+// (ML_GPU_INPAINT handler) but never sets the flag itself, so its own
+// sessions stay WASM — only the spawned worker realm runs GPU. A WebGPU session still runs inside a WASM instance and
+// shares its realm's heap (1.3.4 finding) — that is why GPU LaMa
+// must never share a realm with WASM sessions.
+const WEBGPU_KINDS = (typeof globalThis !== 'undefined' && globalThis.__ctGpuInpaintWorker) ? new Set(['inpaint']) : new Set([]);
 const HAS_WEBGPU = typeof navigator !== 'undefined' && !!navigator.gpu;
 const webgpuDowngraded = new Set(); // kinds that fell back to WASM
 function providersFor(kind) {
@@ -144,6 +157,25 @@ function throwIfCancelled(runId) {
 }
 function releaseRun(runId) {
   if (runId && !cancelledRuns.has(runId)) cancelledRuns.delete(runId);
+}
+
+// Chrome GPU1: GPU jobs owned by the offscreen document (document realm
+// only — the document spawns the GPU worker; the service worker cannot
+// spawn workers). Map runId -> {worker, pending, terminated}. The GPU
+// worker has its own cancelledRuns set, so the document's flag alone
+// cannot stop it: cancel paths terminate the job here (see ML_CANCEL
+// and ML_GPU_CANCEL below). Registry stays empty in worker realms —
+// workers never run ML_GPU_INPAINT (document guard in that handler),
+// so terminating here is a no-op there.
+const chromeGpuJobs = new Map();
+function terminateChromeGpuJob(runId, err) {
+  const job = chromeGpuJobs.get(runId);
+  if (!job) return;
+  chromeGpuJobs.delete(runId);
+  job.terminated = true;
+  try { job.pending?.reject(err || new Error('GPU worker terminated')); } catch {}
+  job.pending = null;
+  try { job.worker.terminate(); } catch {}
 }
 
 // Fast-path inpaint for uniform backgrounds: if the unmasked pixels have low
@@ -243,8 +275,106 @@ const handlers = {
       // the next stage aborts) and would otherwise never be released. Sets
       // iterate in insertion order, so this drops the oldest entries first.
       while (cancelledRuns.size > 64) cancelledRuns.delete(cancelledRuns.values().next().value);
+      // Chrome GPU1: also terminate this run's GPU worker. The worker has
+      // its own cancelledRuns set, so the flag above cannot stop it, and
+      // a blocked GPU run would otherwise keep burning after cancel.
+      // No-op in worker realms (their registry is always empty).
+      terminateChromeGpuJob(runId, Object.assign(new Error('cancelled'), { cancelled: true }));
     }
     return { ok: true };
+  },
+
+  // ML_GPU_CANCEL {runId} — Chrome GPU1: terminate this run's GPU worker
+  // (same termination as ML_CANCEL, but without touching cancelledRuns —
+  // used by the SW watchdog, which downgrades rather than cancels).
+  [MSG.ML_GPU_CANCEL]({ runId }) {
+    if (runId) terminateChromeGpuJob(runId, Object.assign(new Error('cancelled'), { cancelled: true }));
+    return { ok: true };
+  },
+
+  // ML_GPU_INPAINT {patches, runId} — Chrome GPU1: offscreen-document
+  // only. The SW cannot spawn workers, so the document spawns the
+  // dedicated GPU worker (ml-gpu-worker.js, __ctGpuInpaintWorker flag set
+  // there, WEBGPU_KINDS ['inpaint'] in that realm only), forwards this
+  // run's ML_INPAINT to it, forwards its progress through
+  // __ctInpaintProgress (offscreen-progress.js throttles to 500ms, plus
+  // the final 1.0), and terminates the worker after the reply. The
+  // document realm itself never runs a GPU session: its own WEBGPU_KINDS
+  // stays empty, so its WASM sessions are untouched. Results are pixel
+  // keys in IDB, not worker memory, so terminating after a reply loses
+  // nothing. Errors are prefixed GPU_SKIPPED when the failure is absence
+  // (no navigator.gpu, worker creation/ready failure) rather than a GPU
+  // run failure — the SW logs those as "skipped", not "failed", and falls
+  // back to the single WASM path either way. Any other error is a GPU
+  // run failure and the SW downgrades (once) to WASM.
+  async [MSG.ML_GPU_INPAINT]({ patches, runId }) {
+    if (typeof document === 'undefined') throw new Error('GPU_SKIPPED: ml/gpu-inpaint is offscreen-document-only');
+    if (typeof navigator === 'undefined' || !navigator.gpu) throw new Error('GPU_SKIPPED: no navigator.gpu in the offscreen document realm, using WASM path');
+    if (!patches || !patches.length) return { ok: true, results: [], ms: 0, totalTiles: 0 };
+    throwIfCancelled(runId);
+    // A stale job for this run (one inpaint per run, so this should not
+    // happen) dies first rather than running alongside the new one.
+    terminateChromeGpuJob(runId, new Error('replaced by a new GPU job'));
+    let worker;
+    try {
+      worker = new Worker(chrome.runtime.getURL('src/background/ml-gpu-worker.js'));
+    } catch (e) {
+      throw new Error('GPU_SKIPPED: GPU worker creation failed: ' + String((e && e.message) || e));
+    }
+    const job = { worker, pending: null, terminated: false };
+    chromeGpuJobs.set(runId, job);
+    try {
+      await new Promise((resolve, reject) => {
+        const to = setTimeout(() => {
+          reject(new Error('GPU_SKIPPED: GPU worker did not become ready'));
+        }, 5000);
+        worker.onmessage = (e) => {
+          const d = e && e.data;
+          if (!d) return;
+          if (d.type === 'ml-ready') {
+            clearTimeout(to);
+            worker.onmessage = (ev) => {
+              const m = ev && ev.data;
+              if (!m) return;
+              if (m.type === 'inpaint-progress') {
+                try { if (globalThis.__ctInpaintProgress) globalThis.__ctInpaintProgress(runId, m.frac); } catch {}
+                return;
+              }
+              if (m.callId == null || !job.pending) return;
+              const p = job.pending; job.pending = null;
+              if (m.ok) p.resolve(m.res);
+              else p.reject(new Error(m.error || 'GPU worker failed'));
+            };
+            worker.onerror = (ev) => {
+              try { job.pending?.reject(new Error('GPU worker failed: ' + String((ev && ev.message) || ev || ''))); } catch {}
+              job.pending = null;
+            };
+            resolve();
+          }
+        };
+        worker.onerror = (ev) => {
+          clearTimeout(to);
+          reject(new Error('GPU worker failed to start: ' + String((ev && ev.message) || ev || '')));
+        };
+      });
+      throwIfCancelled(runId);
+      const res = await new Promise((resolve, reject) => {
+        job.pending = { resolve, reject };
+        try {
+          worker.postMessage({ type: MSG.ML_INPAINT, runId, callId: 1, patches });
+        } catch (e) {
+          job.pending = null;
+          reject(e);
+        }
+      });
+      return { ok: true, results: (res && res.results) || [], ms: (res && res.ms) || 0, totalTiles: (res && res.totalTiles) || 0 };
+    } finally {
+      // If cancel already deleted the job, this is a no-op (the worker is
+      // already terminated). Otherwise terminate now: results are IDB
+      // keys, so terminating after a reply loses nothing, and it is the
+      // GPU-buffer reclaim on every path (success, error, hang-by-SW).
+      if (chromeGpuJobs.get(runId) === job) terminateChromeGpuJob(runId, null);
+    }
   },
 
   async [MSG.ML_DETECT]({ key, width, height, threshold, runId, noStrip }) {
@@ -354,6 +484,25 @@ const handlers = {
     return { ok: true, results, ms: Math.round(performance.now() - t0), engine };
   },
 
+  // MEASURE1 diagnostic: report the WASM thread facts of the realm
+  // actually running ML (Firefox classic worker or Chrome offscreen
+  // document — same module, both hosts). No model load, no session use,
+  // so it cannot disturb a run. SharedArrayBuffer is what ORT needs for
+  // threads; without it ORT silently runs 1 thread. `context` tells
+  // which realm answered: 'worker' (no document) vs 'document'.
+  [MSG.ML_DIAG]() {
+    let numThreads = null;
+    try { numThreads = (typeof ort !== 'undefined' && ort.env && ort.env.wasm) ? ort.env.wasm.numThreads : null; } catch { numThreads = null; }
+    let sharedArrayBuffer = false;
+    try { sharedArrayBuffer = typeof SharedArrayBuffer !== 'undefined'; } catch { sharedArrayBuffer = false; }
+    let crossOriginIsolated = null;
+    try { crossOriginIsolated = (typeof globalThis !== 'undefined' && 'crossOriginIsolated' in globalThis) ? globalThis.crossOriginIsolated : null; } catch { crossOriginIsolated = null; }
+    let hardwareConcurrency = null;
+    try { hardwareConcurrency = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || null; } catch { hardwareConcurrency = null; }
+    const context = (typeof document !== 'undefined') ? 'document' : 'worker';
+    return { ok: true, sharedArrayBuffer, crossOriginIsolated, hardwareConcurrency, numThreads, context };
+  },
+
   async [MSG.ML_INPAINT]({ patches, runId, attempt }) {
     // `attempt` (from ml-bridge.js): if this is a retry after a timed-out
     // call, namespace the `:out` result keys (`key:out#a2`) so a late
@@ -365,6 +514,14 @@ const handlers = {
     throwIfCancelled(runId);
     const t0 = performance.now();
     const results = [];
+    // MEASURE1: total LaMa tiles across all patches, by the same
+    // tileOrigins math inpaintPatch uses (a patch fitting TILE_MAX is
+    // 1 tile, otherwise xs * ys). Fast-path patches still count: this
+    // is the tiling shape of the page, not a LaMa-run counter.
+    let totalTiles = 0;
+    try {
+      for (const p of patches) totalTiles += tileOrigins(p.width).length * tileOrigins(p.height).length;
+    } catch { totalTiles = 0; }
     // DIAGNOSTIC (temporary): total work, so the log shows how many
     // patches the run had (not a guessed count).
     console.error('[ct-diag] inpaint start run ' + runId + ' patches ' + patches.length);
@@ -410,6 +567,16 @@ const handlers = {
             if (p._oomRetried) throw e;
             const msg = String((e && e.message) || e || '');
             if (/cancel/i.test(msg)) throw e;
+            // GPU1: in the dedicated GPU worker realm, do NOT retry
+            // inside the worker on a GPU run failure. The background
+            // terminates this worker (reclaiming GPU buffers) and
+            // retries once on the preloaded shared WASM worker, which
+            // is faster than loading WASM here and avoids a second
+            // retry (handler retry + background retry would be two).
+            // WASM OOM logic below is untouched: it only runs when
+            // the provider is already WASM (shared worker, offscreen
+            // document, or a GPU worker without navigator.gpu).
+            if (providersFor('inpaint')[0] === 'webgpu' && globalThis.__ctGpuInpaintWorker) throw e;
             const onWebgpu = providersFor('inpaint')[0] === 'webgpu';
             if (!onWebgpu && !isOom(e)) throw e;
             await resetGroup('detector');
@@ -434,7 +601,7 @@ const handlers = {
     } finally {
       releaseRun(runId);
     }
-    return { ok: true, results, ms: Math.round(performance.now() - t0) };
+    return { ok: true, results, ms: Math.round(performance.now() - t0), totalTiles };
   },
 };
 
@@ -444,9 +611,16 @@ const handlers = {
 export const mlHandlers = handlers;
 
 // Guarded: a worker importing this module may not have chrome.runtime.
-// (Chrome offscreen doc and Firefox background page both have it, so their
-// listener registers exactly as before.)
-if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage?.addListener) {
+// Document realm only (Chrome offscreen doc, Firefox background page —
+// both have a document, so their listeners register exactly as before).
+// The document guard is load-bearing for Chrome GPU1: a Dedicated Worker
+// in Chrome may expose chrome.runtime.onMessage, and without it the GPU
+// worker realm would ALSO receive the SW's runtime messages (ML_INPAINT,
+// ML_CANCEL, ...) and run them a second time in the GPU realm —
+// shadowing the document's reply and clobbering pixel outputs. Workers
+// never used this listener anyway (they use self.onmessage), so
+// excluding them changes nothing for Firefox.
+if (typeof document !== 'undefined' && typeof chrome !== 'undefined' && chrome.runtime?.onMessage?.addListener) {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   const fn = handlers[msg && msg.type];
   if (!fn) return false; // not ours

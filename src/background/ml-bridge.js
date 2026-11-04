@@ -79,6 +79,7 @@ const ML_GROUP_FOR_TYPE = {
   [MSG.ML_OCR]: 'OCR',
   [MSG.ML_INPAINT]: 'inpainter',
   [MSG.ML_ENSURE]: 'model',
+  [MSG.ML_DIAG]: 'thread diagnostic',
 };
 const OOM_RE = /out of memory|no available backend|aborted\s*\(/i;
 function mlHostError(type, raw) {
@@ -106,6 +107,7 @@ const ML_TIMEOUT_MS = {
   [MSG.ML_DETECT]: 30 * 1000,
   [MSG.ML_OCR]: 60 * 1000,
   [MSG.ML_INPAINT]: 120 * 1000,
+  [MSG.ML_DIAG]: 10 * 1000,
 };
 const ML_TIMEOUT_DEFAULT_MS = 90 * 1000;
 
@@ -464,7 +466,13 @@ if (typeof chrome !== 'undefined' && chrome.alarms && chrome.alarms.onAlarm) {
 // detect, OCR, inpaint, model ensure, cancel. Ping/download/reset stay on
 // the direct/messaging path — they are fast management calls, not WASM
 // compute, and ping must work even when the worker is down.
-const ML_WORKER_TYPES = new Set([MSG.ML_DETECT, MSG.ML_OCR, MSG.ML_INPAINT, MSG.ML_ENSURE, MSG.ML_CANCEL]);
+const ML_WORKER_TYPES = new Set([MSG.ML_DETECT, MSG.ML_OCR, MSG.ML_INPAINT, MSG.ML_ENSURE, MSG.ML_CANCEL, MSG.ML_DIAG]);
+// MEASURE1: ML_DIAG must ride with the compute types. Without it, the
+// Firefox direct path would answer from the background page's in-process
+// handlers, and the line would describe the background page's realm —
+// not the worker realm that actually runs WASM. (Worker failure still
+// falls back to in-process handlers below; the context field in the
+// reply then says 'document', so a fallback answer is recognisable.)
 
 async function callMlInner(msg) {
   const direct = directHandlers();
@@ -510,6 +518,623 @@ async function callMlInner(msg) {
   if (!res) throw new Error('ML host did not respond');
   if (res.ok === false) throw mlHostError(msg.type, res.error);
   return res;
+}
+
+// ---------------------------------------------------------------- Firefox inpaint pool (POOL1)
+// Firefox WASM threads are OFF (MEASURE1: SharedArrayBuffer no,
+// crossOriginIsolated false, numThreads 1; SAB is impossible in a Firefox
+// extension, Mozilla bug 1673477). The only multi-core route left is
+// several Dedicated Workers, each running single-threaded WASM on its
+// own core. This pool is CPU-only and WASM-only: providers stay ['wasm'],
+// no WebGPU, no GPU code, and numThreads handling is untouched (each
+// worker's WASM is single-threaded because SAB is off, so there is no
+// thread budget to split).
+//
+// Why separate workers, not two concurrent calls to the shared worker:
+// the shared worker (ensureMlWorker above) runs ONE handler module with
+// ONE singleton inpainter session, ONE cancelledRuns set, and ONE
+// progress stream per runId. Two concurrent ML_INPAINT calls into it
+// would share that session (concurrent session.run calls are not proven
+// safe here) and their progress fractions would collide on the same
+// runId. A pool worker is a fresh ml-worker.js instance: its own module,
+// its own inpainter, its own cancelledRuns, its own progress stream.
+// Pixel keys are per-patch and disjoint across groups, and IDB is shared
+// safely, so groups never clobber each other.
+//
+// Pool calls deliberately bypass callMl/callMlInner and the shared
+// worker: the shared worker's timeout path (cancelMlRun) kills the shared
+// worker and fails ALL its pending calls, which would be wrong for one
+// pool group. Each pool group gets its own 120s timer that terminates
+// only that group's worker. FIX1 orphan recovery still covers a dead
+// background page (persisted run record); the pool alarm backup does
+// not cover pool calls, because pool calls never create ct-ml alarm
+// entries — the per-group timer covers the background-alive case and
+// orphan recovery covers the background-dead case.
+// Pure helpers (splitPatchesByArea, aggregateGroupProgress) are exported
+// so the Node harness imports the exact production code, not a copy.
+
+// Greedy balanced split by patch area (LPT scheduling): largest patch
+// first, each patch to the currently-lightest group. Area is the cost
+// proxy (LaMa time scales with tile pixels; tile counts follow area).
+// Returns only non-empty groups, patches in original order within each
+// group. Patch-level balance is coarse on few-patch pages (a single
+// huge patch cannot be split) — that limit is reported, not hidden.
+export function splitPatchesByArea(patches, k = 2) {
+  if (!patches || !patches.length) return [];
+  const n = Math.max(1, Math.min(k || 2, patches.length));
+  const groups = Array.from({ length: n }, () => ({ patches: [], area: 0 }));
+  const sorted = [...patches].sort((a, b) => ((b.width || 0) * (b.height || 0)) - ((a.width || 0) * (a.height || 0)));
+  for (const p of sorted) {
+    let gi = 0;
+    for (let i = 1; i < groups.length; i++) if (groups[i].area < groups[gi].area) gi = i;
+    groups[gi].patches.push(p);
+    groups[gi].area += (p.width || 0) * (p.height || 0);
+  }
+  const order = new Map(patches.map((p, i) => [p, i]));
+  for (const g of groups) g.patches.sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
+  return groups.filter(g => g.patches.length > 0);
+}
+
+// Weighted progress: each group's fraction (0..1 within its subset)
+// weighted by its share of total patch area. Group fractions are
+// monotonic (sequential handler loop), weights are positive, so the
+// aggregate is monotonic and reaches exactly 1 when all groups finish.
+export function aggregateGroupProgress(fracs, weights) {
+  let s = 0;
+  for (let i = 0; i < fracs.length; i++) s += (weights[i] || 0) * (fracs[i] || 0);
+  return Math.max(0, Math.min(1, s));
+}
+
+function poolCreationError(cause) {
+  return Object.assign(new Error('inpaint pool creation failed: ' + String((cause && cause.message) || cause || '')), { poolCreationFailed: true });
+}
+function poolCancelledError() {
+  return Object.assign(new Error('cancelled'), { cancelled: true });
+}
+function poolTimeoutError(timeoutMs) {
+  const err = new Error(`ML host timed out during inpainter after ${timeoutMs / 1000}s — the ML thread was restarted automatically. Try again.`);
+  err.mlTimeout = true;
+  err.mlType = MSG.ML_INPAINT;
+  return err;
+}
+
+function createPoolSlot(createWorker, readyTimeoutMs) {
+  const worker = createWorker();
+  const slot = { worker, pending: new Map(), seq: 0, dead: false, terminated: false, onProgress: null, readyPromise: null, _rejectReady: null };
+  slot.readyPromise = new Promise((resolve, reject) => {
+    slot._rejectReady = reject;
+    const to = setTimeout(() => {
+      slot.dead = true;
+      try { worker.terminate(); } catch {}
+      reject(new Error('pool worker did not become ready'));
+    }, readyTimeoutMs);
+    worker.onmessage = (e) => {
+      const d = e && e.data;
+      if (!d) return;
+      if (d.type === 'ml-ready') {
+        clearTimeout(to);
+        worker.onmessage = (ev) => routePoolSlotMessage(slot, ev);
+        worker.onerror = (ev) => {
+          slot.dead = true;
+          rejectPoolSlotPending(slot, new Error('ML worker failed: ' + String((ev && ev.message) || ev || '')));
+        };
+        resolve();
+      }
+    };
+    worker.onerror = (ev) => {
+      clearTimeout(to);
+      slot.dead = true;
+      reject(new Error('pool worker failed to start: ' + String((ev && ev.message) || ev || '')));
+    };
+  });
+  return slot;
+}
+
+function rejectPoolSlotPending(slot, err) {
+  const pend = [...slot.pending.values()];
+  slot.pending.clear();
+  for (const p of pend) {
+    try { p.reject(err); } catch {}
+  }
+}
+
+function routePoolSlotMessage(slot, e) {
+  const d = e && e.data;
+  if (!d) return;
+  if (d.type === 'inpaint-progress') {
+    try { slot.onProgress?.(d.frac); } catch {}
+    return;
+  }
+  if (d.callId == null) return;
+  const p = slot.pending.get(d.callId);
+  if (!p) return;
+  slot.pending.delete(d.callId);
+  if (d.ok) p.resolve(d.res);
+  else p.reject(new Error(d.error || 'ML worker failed'));
+}
+
+function terminatePoolSlot(slot, err) {
+  if (slot.terminated) return;
+  slot.terminated = true;
+  slot.dead = true;
+  try { slot._rejectReady?.(err || new Error('pool worker terminated')); } catch {}
+  rejectPoolSlotPending(slot, err || new Error('pool worker terminated'));
+  slot.onProgress = null;
+  try { slot.worker.terminate(); } catch {}
+}
+
+function terminatePoolSlots(slots, err) {
+  for (const s of slots || []) {
+    try { terminatePoolSlot(s, err); } catch {}
+  }
+}
+
+// Active pools by runId, so user cancel (from the service worker's abort
+// path) can kill a pool from outside the awaiting runPooledInpaint call.
+const activePools = new Map();
+export function cancelPooledInpaint(runId) {
+  const pool = activePools.get(runId);
+  if (!pool) return;
+  try { pool.close(poolCancelledError()); } catch {}
+}
+
+// Run one ML_INPAINT group on one pool worker with its own timeout.
+// The timer terminates ONLY this group's worker (never the shared
+// worker); termination rejects the pending call with the timeout error.
+async function callPoolSlotWithTimeout(slot, msg, onProgress, timeoutMs) {
+  if (slot.dead || slot.terminated) throw new Error('pool worker is dead');
+  const timer = setTimeout(() => terminatePoolSlot(slot, poolTimeoutError(timeoutMs)), timeoutMs);
+  try {
+    return await new Promise((resolve, reject) => {
+      const callId = ++slot.seq;
+      slot.pending.set(callId, { resolve, reject });
+      slot.onProgress = onProgress;
+      try {
+        slot.worker.postMessage({ ...msg, callId });
+      } catch (e) {
+        slot.pending.delete(callId);
+        reject(e);
+      }
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Firefox-first inpaint pool. opts: {runId, patches, k=2,
+// onProgress(frac 0..1), diag(line), isCancelled(), createWorker,
+// timeoutMs=120000, readyTimeoutMs=5000}. Returns {results, ms, totalTiles}
+// in the same shape as a single ML_INPAINT call, so the caller's merge
+// code is unchanged. Group failure retries once on a FRESH worker
+// (terminated workers never run a retry: their heap may be poisoned);
+// a second failure fails the run cleanly. Pool creation failure throws
+// with poolCreationFailed (caller falls back to the single call).
+// Cancel: cancelPooledInpaint(runId) closes the pool; in-flight groups
+// reject as cancelled and never retry (closed check below prevents
+// post-close worker creation and late writes).
+export async function runPooledInpaint(opts) {
+  const {
+    runId, patches,
+    k = 2,
+    onProgress = () => {},
+    diag = () => {},
+    isCancelled = () => false,
+    createWorker = () => new Worker(chrome.runtime.getURL('src/background/ml-worker.js')),
+    timeoutMs = 120 * 1000,
+    readyTimeoutMs = 5000,
+  } = opts || {};
+  const groups = splitPatchesByArea(patches || [], k);
+  if (!groups.length) return { results: [], ms: 0, totalTiles: 0 };
+  const totalArea = groups.reduce((a, g) => a + g.area, 0);
+  const weights = totalArea > 0 ? groups.map(g => g.area / totalArea) : groups.map(() => 1 / groups.length);
+  diag('inpaint pool groups K=' + groups.length + ' ' + groups.map((g, i) =>
+    `group${i} patches [${g.patches.map(p => p.id).join(',')}] area ${g.area}`).join(' '));
+  const pool = {
+    slots: [],
+    closed: false,
+    close(err) {
+      if (this.closed) return;
+      this.closed = true;
+      terminatePoolSlots(this.slots, err);
+    },
+  };
+  activePools.set(runId, pool);
+  try {
+    try {
+      pool.slots = groups.map(() => createPoolSlot(createWorker, readyTimeoutMs));
+      await Promise.all(pool.slots.map(s => s.readyPromise));
+    } catch (e) {
+      throw poolCreationError(e);
+    }
+    const fracs = groups.map(() => 0);
+    const report = () => {
+      try { onProgress(aggregateGroupProgress(fracs, weights)); } catch {}
+    };
+    const runAttempt = async (gi, attempt) => {
+      if (pool.closed) throw new Error('pool worker terminated');
+      if (isCancelled()) throw poolCancelledError();
+      const slot = pool.slots[gi];
+      const subset = groups[gi].patches.map(({ id, key, maskKey, width, height }) => ({ id, key, maskKey, width, height }));
+      return await callPoolSlotWithTimeout(slot,
+        { type: MSG.ML_INPAINT, runId, attempt, patches: subset },
+        (f) => { fracs[gi] = f; report(); },
+        timeoutMs);
+    };
+    const runGroup = async (gi) => {
+      try {
+        return await runAttempt(gi, 1);
+      } catch (e) {
+        if (pool.closed || isCancelled() || (e && e.cancelled)) throw e;
+        diag('inpaint pool group ' + gi + ' failed, retrying once: ' + String((e && e.message) || e).slice(0, 120));
+        try {
+          const old = pool.slots[gi];
+          try { terminatePoolSlot(old); } catch {}
+          const replacement = createPoolSlot(createWorker, readyTimeoutMs);
+          pool.slots[gi] = replacement;
+          await replacement.readyPromise;
+        } catch (re) {
+          throw e;
+        }
+        return await runAttempt(gi, 2);
+      }
+    };
+    const groupResults = await Promise.all(groups.map((_, gi) => runGroup(gi)));
+    const allResults = groupResults.flatMap(r => r.results || []);
+    const ms = Math.max(0, ...groupResults.map(r => r.ms || 0));
+    const totalTiles = groupResults.reduce((a, r) => a + (r.totalTiles || 0), 0);
+    diag('inpaint pool done groups ms [' + groupResults.map(r => r.ms || 0).join(',') + '] totalTiles ' + totalTiles);
+    return { results: allResults, ms, totalTiles };
+  } finally {
+    activePools.delete(runId);
+    try { pool.close(); } catch {}
+  }
+}
+
+// ---------------------------------------------------------------- Firefox GPU inpaint (GPU1, LaMa only)
+// The missing piece from 1.3.6 was a hang watchdog: a GPU stall throws
+// nothing, so error-only fallback can never catch it. This section is
+// that watchdog, plus the separate GPU worker it watches.
+//
+// Why a separate worker, not the shared worker: a WebGPU session still
+// runs inside a WASM instance and shares its realm's heap (1.3.4
+// finding). Running GPU LaMa in the shared worker would mix GPU
+// buffers with WASM sessions in one heap. The GPU worker
+// (ml-gpu-worker.js) is a fresh realm whose only GPU model is LaMa
+// (detector hardcodes WASM, Baberu is never in WEBGPU_KINDS). Detector
+// and Baberu never touch this worker: they keep going through callMl
+// and the shared worker, exactly as today.
+//
+// Why the retry lives in the service worker, not in the GPU worker:
+// offscreen.js deliberately does NOT retry a GPU run failure inside
+// the GPU worker realm (see its GPU1 early throw). The background
+// terminates the GPU worker first (reclaiming GPU buffers, and
+// preventing any late GPU write from clobbering the retry), then
+// retries once on the shared WASM worker, which was preloaded at run
+// start and is therefore faster than loading WASM in the GPU worker.
+// Total WASM retries for a GPU run failure is one. The service worker
+// also marks the run downgraded, so GPU is never retried again in
+// that run. Across runs GPU is retried fresh (per-run stick only, per
+// spec); if hangs prove deterministic, a session stick is a one-line
+// follow-up, not assumed here.
+//
+// Watchdog window: 60s of no progress AND no reply, under the 120s
+// inpaint timeout that bounds it. Justification: a GPU tile should
+// complete in seconds (Chrome GPU inpaint is 24s total for 11 tiles,
+// about 2s per tile; even a huge 512 tile on GPU is well under 60s),
+// so 60s with no tile completing and no reply is hang evidence, not
+// slowness. No total cap is imposed: a slow-but-progressing GPU run
+// (progress arriving regularly) is allowed to exceed 120s total,
+// because killing it would be a false positive, and the WASM retry
+// still has its own 120s callMl timeout. A false positive costs time
+// (60s + WASM retry), never correctness: the run still completes on
+// WASM. The watchdog is inactivity-only, so it catches the 1.3.6
+// pattern (progress stops at 71%, then silence) as well as a
+// no-progress-from-start hang.
+//
+// Alarm note: GPU calls bypass callMl (like pool calls), so they
+// create no ct-ml alarm entries. The watchdog covers the
+// background-alive case; FIX1 orphan recovery covers the
+// background-dead case. Firefox only reaches this section: the
+// service worker only calls it on the Firefox directHandlers path.
+// Chrome GPU has its own section below (runChromeGpuInpaint): same
+// watchdog and downgrade, forwarded through the offscreen document,
+// which is the only context that can spawn the GPU worker there.
+//
+// Slot code below mirrors the pool slots on purpose (same ready,
+// routing, and termination shape) but is kept separate so pool
+// behavior cannot regress from GPU changes, and vice versa.
+export const GPU_WATCHDOG_INACTIVITY_MS = 60 * 1000;
+const GPU_READY_TIMEOUT_MS = 5 * 1000;
+
+function gpuHangError(watchdogMs) {
+  const err = new Error(`GPU inpaint hang: no progress or reply for ${watchdogMs / 1000}s — the GPU worker was terminated automatically. Downgrading to WASM for this run.`);
+  err.gpuHang = true;
+  err.mlType = MSG.ML_INPAINT;
+  return err;
+}
+function gpuCancelledError() {
+  return Object.assign(new Error('cancelled'), { cancelled: true });
+}
+
+const activeGpuJobs = new Map();
+export function cancelGpuInpaint(runId) {
+  const job = activeGpuJobs.get(runId);
+  if (!job) return;
+  try { job.close(gpuCancelledError()); } catch {}
+}
+
+function createGpuSlot(createWorker, readyTimeoutMs) {
+  const worker = createWorker();
+  const slot = { worker, pending: new Map(), seq: 0, dead: false, terminated: false, onProgress: null, readyPromise: null, _rejectReady: null };
+  slot.readyPromise = new Promise((resolve, reject) => {
+    slot._rejectReady = reject;
+    const to = setTimeout(() => {
+      slot.dead = true;
+      try { worker.terminate(); } catch {}
+      reject(new Error('GPU worker did not become ready'));
+    }, readyTimeoutMs);
+    worker.onmessage = (e) => {
+      const d = e && e.data;
+      if (!d) return;
+      if (d.type === 'ml-ready') {
+        clearTimeout(to);
+        worker.onmessage = (ev) => routeGpuSlotMessage(slot, ev);
+        worker.onerror = (ev) => {
+          slot.dead = true;
+          rejectGpuSlotPending(slot, new Error('GPU worker failed: ' + String((ev && ev.message) || ev || '')));
+        };
+        resolve();
+      }
+    };
+    worker.onerror = (ev) => {
+      clearTimeout(to);
+      slot.dead = true;
+      reject(new Error('GPU worker failed to start: ' + String((ev && ev.message) || ev || '')));
+    };
+  });
+  return slot;
+}
+
+function rejectGpuSlotPending(slot, err) {
+  const pend = [...slot.pending.values()];
+  slot.pending.clear();
+  for (const p of pend) {
+    try { p.reject(err); } catch {}
+  }
+}
+
+function routeGpuSlotMessage(slot, e) {
+  const d = e && e.data;
+  if (!d) return;
+  if (d.type === 'inpaint-progress') {
+    try { slot.onProgress?.(d.frac); } catch {}
+    return;
+  }
+  if (d.callId == null) return;
+  const p = slot.pending.get(d.callId);
+  if (!p) return;
+  slot.pending.delete(d.callId);
+  if (d.ok) p.resolve(d.res);
+  else p.reject(new Error(d.error || 'GPU worker failed'));
+}
+
+function terminateGpuSlot(slot, err) {
+  if (slot.terminated) return;
+  slot.terminated = true;
+  slot.dead = true;
+  try { slot._rejectReady?.(err || new Error('GPU worker terminated')); } catch {}
+  rejectGpuSlotPending(slot, err || new Error('GPU worker terminated'));
+  slot.onProgress = null;
+  try { slot.worker.terminate(); } catch {}
+}
+
+// Firefox GPU inpaint. opts: {runId, patches, onProgress(frac 0..1),
+// diag(line), isCancelled(), createWorker,
+// watchdogInactivityMs=60000, readyTimeoutMs=5000}. Returns
+// {results, ms, totalTiles} in the same shape as a single ML_INPAINT
+// call, so the caller's merge code is unchanged. Throws once on any
+// GPU failure (error, hang, creation failure); it never retries
+// internally — the service worker downgrades and retries once on WASM.
+// Cancel rejects as cancelled and never retries. The GPU worker is
+// terminated on every path (success, failure, cancel, hang): results
+// are pixel keys in IDB, not worker memory, so terminating after a
+// reply loses nothing, and termination is the GPU-buffer reclaim.
+export async function runGpuInpaint(opts) {
+  const {
+    runId, patches,
+    onProgress = () => {},
+    diag = () => {},
+    isCancelled = () => false,
+    createWorker = () => new Worker(chrome.runtime.getURL('src/background/ml-gpu-worker.js')),
+    watchdogInactivityMs = GPU_WATCHDOG_INACTIVITY_MS,
+    readyTimeoutMs = GPU_READY_TIMEOUT_MS,
+  } = opts || {};
+  if (!patches || !patches.length) return { results: [], ms: 0, totalTiles: 0 };
+  if (isCancelled()) throw gpuCancelledError();
+  const slot = createGpuSlot(createWorker, readyTimeoutMs);
+  let watchdogTimer = null;
+  let watchdogFired = false;
+  const clearWatchdog = () => { if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; } };
+  const fireWatchdog = () => {
+    if (watchdogFired || slot.terminated) return;
+    watchdogFired = true;
+    try { diag('inpaint gpu watchdog fired: no progress or reply for ' + (watchdogInactivityMs / 1000) + 's, terminating GPU worker'); } catch {}
+    terminateGpuSlot(slot, gpuHangError(watchdogInactivityMs));
+  };
+  const armWatchdog = () => {
+    clearWatchdog();
+    if (!slot.terminated && !watchdogFired) watchdogTimer = setTimeout(fireWatchdog, watchdogInactivityMs);
+  };
+  const noteActivity = () => { if (!slot.terminated && !watchdogFired) armWatchdog(); };
+  const job = { close(err) { clearWatchdog(); terminateGpuSlot(slot, err || gpuCancelledError()); } };
+  activeGpuJobs.set(runId, job);
+  try {
+    await slot.readyPromise;
+    if (isCancelled()) throw gpuCancelledError();
+    slot.onProgress = (frac) => {
+      noteActivity();
+      try { onProgress(frac); } catch {}
+    };
+    const res = await new Promise((resolve, reject) => {
+      const callId = ++slot.seq;
+      slot.pending.set(callId, { resolve, reject });
+      // Arm at send: silence from here counts as inactivity. Progress
+      // events re-arm (noteActivity); the reply clears (below).
+      armWatchdog();
+      try {
+        slot.worker.postMessage({
+          type: MSG.ML_INPAINT, runId, callId,
+          patches: patches.map(({ id, key, maskKey, width, height }) => ({ id, key, maskKey, width, height })),
+        });
+      } catch (e) {
+        slot.pending.delete(callId);
+        reject(e);
+      }
+    });
+    clearWatchdog();
+    return { results: (res && res.results) || [], ms: (res && res.ms) || 0, totalTiles: (res && res.totalTiles) || 0 };
+  } finally {
+    clearWatchdog();
+    if (activeGpuJobs.get(runId) === job) activeGpuJobs.delete(runId);
+    try { terminateGpuSlot(slot, null); } catch {}
+  }
+}
+
+// ---------------------------------------------------------------- Chrome GPU inpaint (GPU1-Chrome, LaMa only)
+// Same rules as Firefox GPU1, different forwarding: the Chrome service
+// worker cannot spawn workers, so the GPU worker is spawned by the
+// offscreen document (offscreen.js ML_GPU_INPAINT handler), which the SW
+// reaches over the existing runtime message channel (the same channel
+// callMl uses: ensureMlHost + chrome.runtime.sendMessage -> the doc's
+// onMessage listener). Detector and Baberu never touch this path: they
+// keep going through callMl, and the doc's own WEBGPU_KINDS stays empty
+// — only the spawned worker realm has ['inpaint'].
+//
+// Watchdog: background-side (this module, SW thread), 60s of no progress
+// AND no reply, same window and justification as Firefox GPU1. Progress
+// arrives one-way from the doc via ML_INPAINT_PROGRESS (offscreen-
+// progress.js, throttled 500ms + final 1.0); the SW's progress branch
+// forwards it here via notifyChromeGpuProgress, which re-arms the
+// watchdog. No total cap: a slow-but-progressing GPU run is not killed.
+// On watchdog fire, this module sends ML_GPU_CANCEL to the doc (which
+// terminates the GPU worker) and throws a hang error; the service
+// worker downgrades once to WASM, exactly like Firefox. On any GPU
+// failure except user cancel (error, hang), the SW downgrades once;
+// on GPU_SKIPPED (no navigator.gpu in the doc realm, worker creation /
+// ready failure), the SW logs "skipped" and falls back to the single
+// WASM path. Cancel never falls back: cancelChromeGpuInpaint rejects
+// as cancelled and sends ML_GPU_CANCEL, and the ML_CANCEL broadcast to
+// the doc terminates the job there too (belt and suspenders, idempotent).
+//
+// Alarm note: like pool and Firefox GPU calls, Chrome GPU calls bypass
+// callMl, so they create no ct-ml alarm entries. The watchdog covers
+// the SW-alive case. The SW-dead case is NOT covered by the callMl
+// alarm backup for GPU calls (no entry exists to fire); progress
+// messages keep the SW alive during progressing runs, and the doc
+// terminates the GPU worker after any reply, so a dead SW leaves a job
+// that ends on its own, not a leak — but the run itself is lost, same
+// as any SW-death without an alarm entry. Reported as a known limit,
+// not hidden.
+//
+// The offscreen doc's runtime listener is document-guarded (see
+// offscreen.js): without that guard a Chrome Dedicated Worker exposing
+// chrome.runtime.onMessage would also receive the SW's messages and
+// run them a second time in the GPU realm.
+const chromeGpuProgressHooks = new Map();
+export function notifyChromeGpuProgress(runId, frac) {
+  try { chromeGpuProgressHooks.get(runId)?.(frac); } catch {}
+}
+const activeChromeGpuJobs = new Map();
+export function cancelChromeGpuInpaint(runId) {
+  const job = activeChromeGpuJobs.get(runId);
+  if (!job) return;
+  try { job.close(gpuCancelledError()); } catch {}
+}
+function chromeGpuSkippedError(message) {
+  return Object.assign(new Error(message), { gpuSkipped: true });
+}
+
+// Chrome GPU inpaint. opts: {runId, patches, onProgress(frac 0..1),
+// diag(line), isCancelled(), ensureHost, sendGpuMessage, cancelGpuMessage,
+// watchdogInactivityMs=60000}. Returns {results, ms, totalTiles} in the
+// same shape as a single ML_INPAINT call, so the caller's merge code is
+// unchanged. Throws once on any GPU failure (error, hang, skipped);
+// it never retries internally — the service worker downgrades (or falls
+// back on skipped) once to WASM. Cancel rejects as cancelled and never
+// retries. sendGpuMessage/cancelGpuMessage/ensureHost are injectable so
+// the Node harness can mock the offscreen doc without a browser.
+export async function runChromeGpuInpaint(opts) {
+  const {
+    runId, patches,
+    onProgress = () => {},
+    diag = () => {},
+    isCancelled = () => false,
+    ensureHost = () => ensureMlHost(),
+    sendGpuMessage = (msg) => chrome.runtime.sendMessage(msg),
+    cancelGpuMessage = (msg) => { try { const p = chrome.runtime.sendMessage(msg); if (p && p.catch) p.catch(() => {}); } catch {} },
+    watchdogInactivityMs = GPU_WATCHDOG_INACTIVITY_MS,
+  } = opts || {};
+  if (!patches || !patches.length) return { results: [], ms: 0, totalTiles: 0 };
+  if (isCancelled()) throw gpuCancelledError();
+  let watchdogTimer = null;
+  let watchdogFired = false;
+  let cancelReject = null;
+  const clearWatchdog = () => { if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; } };
+  const fireWatchdog = () => {
+    if (watchdogFired) return;
+    watchdogFired = true;
+    try { diag('inpaint gpu watchdog fired: no progress or reply for ' + (watchdogInactivityMs / 1000) + 's, terminating GPU worker'); } catch {}
+    try { cancelGpuMessage({ type: MSG.ML_GPU_CANCEL, runId }); } catch {}
+    try { cancelReject?.(gpuHangError(watchdogInactivityMs)); } catch {}
+  };
+  const armWatchdog = () => {
+    clearWatchdog();
+    if (!watchdogFired) watchdogTimer = setTimeout(fireWatchdog, watchdogInactivityMs);
+  };
+  const noteActivity = () => { if (!watchdogFired) armWatchdog(); };
+  const job = {
+    close(err) {
+      clearWatchdog();
+      try { cancelGpuMessage({ type: MSG.ML_GPU_CANCEL, runId }); } catch {}
+      try { cancelReject?.(err || gpuCancelledError()); } catch {}
+    },
+  };
+  activeChromeGpuJobs.set(runId, job);
+  chromeGpuProgressHooks.set(runId, (frac) => {
+    noteActivity();
+    try { onProgress(frac); } catch {}
+  });
+  try {
+    await ensureHost();
+    if (isCancelled()) throw gpuCancelledError();
+    const res = await new Promise((resolve, reject) => {
+      cancelReject = reject;
+      armWatchdog();
+      let reply;
+      try {
+        reply = sendGpuMessage({ type: MSG.ML_GPU_INPAINT, runId, patches: patches.map(({ id, key, maskKey, width, height }) => ({ id, key, maskKey, width, height })) });
+      } catch (e) {
+        reject(e);
+        return;
+      }
+      Promise.resolve(reply).then((r) => {
+        if (!r) { reject(new Error('ML host did not respond')); return; }
+        if (r.ok === false) {
+          const m = String(r.error || 'GPU worker failed');
+          if (m.startsWith('GPU_SKIPPED:')) reject(chromeGpuSkippedError(m));
+          else reject(new Error(m));
+          return;
+        }
+        resolve(r);
+      }, (e) => reject(e));
+    });
+    clearWatchdog();
+    return { results: (res && res.results) || [], ms: (res && res.ms) || 0, totalTiles: (res && res.totalTiles) || 0 };
+  } finally {
+    clearWatchdog();
+    if (activeChromeGpuJobs.get(runId) === job) activeChromeGpuJobs.delete(runId);
+    if (chromeGpuProgressHooks.get(runId)) chromeGpuProgressHooks.delete(runId);
+  }
 }
 
 // Canvas that works in a service worker (OffscreenCanvas) and in a
