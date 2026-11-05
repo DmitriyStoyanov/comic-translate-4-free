@@ -885,6 +885,21 @@ async function runPipeline(tabId, opts = {}) {
     } catch (e) {
       diagPush('thread-info failed: ' + String((e && e.message) || e).slice(0, 120));
     }
+    // Chrome GPU1 (2.0.7): warm the shared GPU worker NOW, at pipeline
+    // start, so the ~6s LaMa load overlaps detect/OCR/translate instead
+    // of blocking the inpaint stage. Fire and forget — the run never
+    // waits for it. If the worker is already warm this is ~free; if
+    // warmup fails the normal GPU path still falls back to WASM.
+    // Placed after ML_DIAG, so the offscreen doc is proven alive and
+    // listening. Firefox already preloads above (awaited, for heap
+    // reasons), so this is Chrome-only.
+    if (!directHandlers()) {
+      diagPush('inpaint gpu warmup start run ' + runId);
+      try {
+        const p = chrome.runtime.sendMessage({ type: MSG.ML_GPU_WARMUP, runId });
+        if (p && p.catch) p.catch(() => {});
+      } catch {}
+    }
     // Inject the overlay early so debug-stage payloads have a panel to land in.
     // content.js guards against double-injection; the canvas stays empty until render.
     // Gate on the host permission first: without it injection always fails, and

@@ -411,6 +411,21 @@ const handlers = {
     return { ok: true };
   },
 
+  // ML_GPU_WARMUP {runId} — Chrome GPU1 (2.0.7): warm the shared GPU
+  // worker at pipeline start (see service-worker.js). Creates the
+  // worker if needed, then posts ML_ENSURE for inpaint so the LaMa
+  // model loads now, overlapping detect/OCR/translate. The reply is
+  // ignored (no pending entry) and this handler never throws — a
+  // warmup failure changes nothing: the normal GPU path still loads
+  // on demand and falls back to WASM on failure.
+  async [MSG.ML_GPU_WARMUP]({ runId }) {
+    try {
+      const { worker } = await getChromeGpuWorker();
+      try { worker.postMessage({ type: MSG.ML_ENSURE, model: 'inpaint', runId, callId: ++chromeGpuSeq }); } catch {}
+    } catch {}
+    return { ok: true };
+  },
+
   // ML_GPU_INPAINT {patches, runId} — Chrome GPU1: offscreen-document
   // only. The SW cannot spawn workers, so the document owns the
   // dedicated GPU worker (ml-gpu-worker.js, __ctGpuInpaintWorker flag set

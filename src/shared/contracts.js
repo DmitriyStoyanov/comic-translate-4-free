@@ -32,6 +32,7 @@ export const MSG = {
   ML_DIAG: 'ml/diag',                    // MEASURE1 {runId} -> {ok, sharedArrayBuffer, crossOriginIsolated, hardwareConcurrency, numThreads, context} (realm thread facts, no model load)
   ML_INPAINT_PROGRESS: 'ml/inpaint-progress', // offscreen -> SW (one-way) {runId, frac} (pill progress + worker keep-alive)
   ML_GPU_INPAINT: 'ml/gpu-inpaint',      // Chrome GPU1: SW -> offscreen doc {patches, runId} -> {ok, results, ms, totalTiles} (doc owns one shared dedicated GPU worker across runs; doc realm itself never runs GPU sessions)
+  ML_GPU_WARMUP: 'ml/gpu-warmup',        // Chrome GPU1: SW -> offscreen doc {runId} -> {ok} (pipeline start: create the shared GPU worker and load LaMa now, so the load overlaps detect/OCR/translate)
   ML_GPU_CANCEL: 'ml/gpu-cancel',        // Chrome GPU1: SW -> offscreen doc {runId} -> {ok} (watchdog hang only: terminate the shared GPU worker; idempotent)
   // SW -> content (tabs.sendMessage)
   RUN_STARTED: 'ct/run-started',         // {runId} (marks the tab's current run; stale renders are ignored)
