@@ -527,21 +527,15 @@ const handlers = {
       }
       return n > 1 ? Math.sqrt(m2 / (n - 1)) : 0;
     };
-    // DIAG-EXP (2.0.10): OCR crops run 2 at a time. Baberu decodes one
-    // token at a time per crop and a single crop does not fill 10 WASM
-    // threads, so two crops share the threads better. _decode keeps all
-    // decode state (KV cache, logits, seq) in locals; only the three
-    // sessions are shared, and concurrent session.run calls carry their
-    // own feed tensors. Batching is still impossible (batch=1 baked into
-    // the graphs, see baberu.js) — this is concurrency, not batching.
-    const OCR_CONCURRENCY = 2;
-    const results = new Array(crops.length);
-    let nextCrop = 0;
-    const runOneCrop = async () => {
-      for (;;) {
-        const idx = nextCrop++;
-        if (idx >= crops.length) return;
-        const c = crops[idx];
+    // 2.0.10 tried 2 crops at a time and it did NOT help: total 7,535ms
+    // -> 7,268ms (noise — OCR varies by seconds run to run) while each
+    // crop got ~2x slower (1,124ms max -> 2,334ms max), so one crop
+    // already fills the 10 WASM threads and two just share them.
+    // Reverted to sequential in 2.0.11; do not re-add concurrency here
+    // without a new measurement.
+    const results = [];
+    try {
+      for (const c of crops) {
         throwIfCancelled(runId);
         // DIAG (2.0.9): per-crop ms — Baberu is autoregressive, so time
         // grows with output tokens; one long crop can dominate the stage.
@@ -552,7 +546,7 @@ const handlers = {
         // vision+prefill+autoregressive steps. Empty text flows downstream
         // exactly as if OCR had returned ''.
         if (cropStddev(u8) < 3.0) {
-          results[idx] = { id: c.id, text: '', chars: 0, chunks: 0, hitCeiling: false, stopped: 'eos', skipped: true, ms: Math.round(performance.now() - cT0) };
+          results.push({ id: c.id, text: '', chars: 0, chunks: 0, hitCeiling: false, stopped: 'eos', skipped: true, ms: Math.round(performance.now() - cT0) });
           continue;
         }
         // Baberu v1.1 reads up to ~256 chars; the chunked path is a rare
@@ -578,13 +572,8 @@ const handlers = {
             shouldAbort: () => cancelledRuns.has(runId),
           });
         }
-        results[idx] = { id: c.id, text: r.text, chars: r.text.length, chunks: r.chunks, hitCeiling: r.hitCeiling, stopped: r.stopped, ms: Math.round(performance.now() - cT0) };
+        results.push({ id: c.id, text: r.text, chars: r.text.length, chunks: r.chunks, hitCeiling: r.hitCeiling, stopped: r.stopped, ms: Math.round(performance.now() - cT0) });
       }
-    };
-    try {
-      const workers = [];
-      for (let w = 0; w < Math.min(OCR_CONCURRENCY, crops.length); w++) workers.push(runOneCrop());
-      await Promise.all(workers);
     } finally {
       releaseRun(runId);
     }
@@ -635,7 +624,7 @@ const handlers = {
     const tileMax = providersFor('inpaint')[0] === 'webgpu' ? 1024 : TILE_MAX;
     throwIfCancelled(runId);
     const t0 = performance.now();
-    const results = [];
+    const results = new Array(patches.length);
     // MEASURE1: total LaMa tiles across all patches, by the same
     // tileOrigins math inpaintPatch uses (a patch fitting tileMax is
     // 1 tile, otherwise xs * ys). Fast-path patches still count: this
@@ -652,15 +641,40 @@ const handlers = {
     // background-ff.js/service-worker.js). The Chrome offscreen document sets
     // it via offscreen-progress.js (forwarded to the service worker). Without
     // it a multi-minute tiled inpaint looks exactly like a stall.
-    const reportInpaint = (frac) => {
-      try { if (globalThis.__ctInpaintProgress) globalThis.__ctInpaintProgress(runId, frac); } catch { /* never break inpaint */ }
+    // Progress across parallel patches: each patch reports its own
+    // 0..1 fraction; the bar shows the mean, so it moves forward
+    // steadily no matter which patch finishes first.
+    const patchFrac = new Array(patches.length).fill(0);
+    let maxInpaintFrac = 0;
+    const reportInpaint = (pi, frac) => {
+      if (pi != null) patchFrac[pi] = Math.max(patchFrac[pi] || 0, frac);
+      let sum = 0;
+      for (const f of patchFrac) sum += f;
+      const overall = patches.length ? sum / patches.length : 1;
+      if (overall <= maxInpaintFrac) return;
+      maxInpaintFrac = overall;
+      try { if (globalThis.__ctInpaintProgress) globalThis.__ctInpaintProgress(runId, overall); } catch { /* never break inpaint */ }
     };
     // DIAG (2.0.8): per-patch time, so one Mac run shows whether the
     // GPU tile time is one big patch, even per-tile cost, or fast-path
     // hits — the fix depends on which it is.
-    const patchStats = [];
-    try {
-      for (const [pi, p] of patches.entries()) {
+    const patchStats = new Array(patches.length);
+    // DIAG-EXP (2.0.11): patches run in parallel on WebGPU (up to 4),
+    // sequential on WASM. Each patch has its own pixels and its own
+    // output key, and inpaintPatch keeps all work in locals except the
+    // shared session — so concurrent session.run calls cannot mix
+    // patches up. Whether it saves time depends on whether one LaMa
+    // run already fills the GPU: the 2.0.10 OCR test showed one Baberu
+    // crop already fills the WASM threads, so the same may hold here.
+    // WASM stays sequential for the same reason (and a WASM run blocks
+    // its thread, so parallel patches there would only interleave).
+    const PATCH_CONCURRENCY = providersFor('inpaint')[0] === 'webgpu' ? 4 : 1;
+    let nextPatch = 0;
+    const runOnePatch = async () => {
+      for (;;) {
+        const pi = nextPatch++;
+        if (pi >= patches.length) return;
+        const p = patches[pi];
         throwIfCancelled(runId);
         const pT0 = performance.now();
         const rgbaRaw = await pixelPeek(p.key);
@@ -680,7 +694,7 @@ const handlers = {
             out = await inpainter.inpaintPatch(
               rgba, mask, p.width, p.height,
               () => cancelledRuns.has(runId),
-              (done, total) => reportInpaint((pi + done / total) / patches.length),
+              (done, total) => reportInpaint(pi, done / total),
               tileMax);
           } catch (e) {
             // WebGPU run failure recovery: if LaMa is on WebGPU, ANY
@@ -718,18 +732,23 @@ const handlers = {
             out = await inpainter.inpaintPatch(
               rgba, mask, p.width, p.height,
               () => cancelledRuns.has(runId),
-              (done, total) => reportInpaint((pi + done / total) / patches.length),
+              (done, total) => reportInpaint(pi, done / total),
               tileMax);
           }
         }
         const resKey = p.key + ':out' + outSuffix;
         await pixelPut(resKey, out.buffer);
-        results.push({ id: p.id, key: resKey, width: p.width, height: p.height });
+        results[pi] = { id: p.id, key: resKey, width: p.width, height: p.height };
         let pTiles = 0;
         try { pTiles = tileOrigins(p.width, tileMax).length * tileOrigins(p.height, tileMax).length; } catch { pTiles = 0; }
-        patchStats.push({ id: p.id, w: p.width, h: p.height, tiles: pTiles, fast: !!bgFill, ms: Math.round(performance.now() - pT0) });
-        reportInpaint((pi + 1) / patches.length);
+        patchStats[pi] = { id: p.id, w: p.width, h: p.height, tiles: pTiles, fast: !!bgFill, ms: Math.round(performance.now() - pT0) };
+        reportInpaint(pi, 1);
       }
+    };
+    try {
+      const workers = [];
+      for (let w = 0; w < Math.min(PATCH_CONCURRENCY, patches.length); w++) workers.push(runOnePatch());
+      await Promise.all(workers);
     } finally {
       releaseRun(runId);
     }
