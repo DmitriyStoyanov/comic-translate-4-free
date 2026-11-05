@@ -180,16 +180,6 @@ async function runThreadBenchmark() {
   benchCancelled = false;
   try {
     const cores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
-    try {
-      const m = await readMeasuredThreads();
-      // method 'full-chain' (2.0.20): an older step-only result has no
-      // method, so it is re-measured once with the full chain instead
-      // of being kept — the old number answered a different question.
-      if (m && m.method === 'full-chain' && m.hardwareConcurrency === cores && Number.isInteger(m.threads)) {
-        benchLog('threads bench skipped: already measured ' + m.threads + ' threads');
-        return;
-      }
-    } catch {}
     // Doubling spread up to the machine's core count: each step doubles
     // the parallelism, so the curve is sampled at doubling points on any
     // machine — 10 cores -> 1,2,4,8,10; 18 cores -> 1,2,4,8,16,18.
@@ -198,27 +188,74 @@ async function runThreadBenchmark() {
     const counts = [];
     for (let n = 1; n < cores; n *= 2) counts.push(n);
     counts.push(cores);
-    benchLog('threads bench started, testing ' + counts.join(', ') + ' threads');
+    // 2.0.23: RESUMABLE. The bench runs in a background offscreen doc
+    // that the browser can freeze/throttle when idle, and a new run can
+    // cancel it — and until now it saved NOTHING until every count was
+    // done, so each attempt restarted from count 1 and never finished
+    // (James: >10 min, still no result). Now each count's timings are
+    // saved the moment that count finishes (partial: true, no winner
+    // yet, so threadsReady ignores it), and the next trigger resumes
+    // from the counts still missing instead of starting over. A cancel
+    // or freeze loses at most the in-flight count. A complete save
+    // (integer threads winner) still skips the bench entirely, and a
+    // partial from a different core count is discarded. A count that
+    // fails is retried on the next trigger (its slot stays empty).
+    // method 'full-chain' (2.0.20): an older step-only result has no
+    // method, so it is re-measured once with the full chain instead
+    // of being kept — the old number answered a different question.
+    const timings = {};
+    try {
+      const m = await readMeasuredThreads();
+      if (m && m.method === 'full-chain' && m.hardwareConcurrency === cores && Number.isInteger(m.threads)) {
+        benchLog('threads bench skipped: already measured ' + m.threads + ' threads');
+        return;
+      }
+      if (m && m.method === 'full-chain' && m.hardwareConcurrency === cores && m.timings && typeof m.timings === 'object') {
+        for (const n of counts) {
+          const t = m.timings[n];
+          if (t && typeof t.total === 'number' && typeof t.vision === 'number' && typeof t.prefill === 'number' && typeof t.step === 'number') {
+            timings[n] = { vision: t.vision, prefill: t.prefill, step: t.step, total: t.total };
+          }
+        }
+      }
+    } catch {}
     const results = [];
     for (const n of counts) {
+      const t = timings[n];
+      if (t) results.push({ threads: n, visionMs: t.vision, prefillMs: t.prefill, stepMs: t.step, totalMs: t.total });
+    }
+    const remaining = counts.filter((n) => !timings[n]);
+    if (remaining.length) {
+      benchLog('threads bench started, testing ' + remaining.join(', ') + ' threads' + (results.length ? ' (resuming, ' + results.length + ' already measured)' : ''));
+    } else {
+      benchLog('threads bench resuming, all counts already measured — picking the winner');
+    }
+    for (const n of remaining) {
       if (benchCancelled) break;
       const r = await benchOneCount(n);
       if (benchCancelled) break;
       if (r != null && !r.error && typeof r.totalMs === 'number') {
         results.push({ threads: n, ...r });
+        timings[n] = { vision: Math.round(r.visionMs * 10) / 10, prefill: Math.round(r.prefillMs * 10) / 10, step: Math.round(r.stepMs * 10) / 10, total: Math.round(r.totalMs * 10) / 10 };
         benchLog('threads bench ' + n + ' threads: vision ' + Math.round(r.visionMs) + 'ms prefill ' + Math.round(r.prefillMs) + 'ms step ' + Math.round(r.stepMs * 10) / 10 + 'ms/step total ' + Math.round(r.totalMs) + 'ms/crop');
+        // Save after EVERY count — a cancel/freeze loses at most the
+        // in-flight count, never the ones already measured.
+        try { await saveMeasuredThreads({ method: 'full-chain', timings, hardwareConcurrency: cores, measuredAt: new Date().toISOString(), partial: true }); } catch {}
       } else if (r && r.error) {
         benchLog('threads bench ' + n + ' threads: failed: ' + String(r.error).slice(0, 120));
       } else {
         benchLog('threads bench ' + n + ' threads: failed');
       }
     }
-    if (benchCancelled) { benchLog('threads bench cancelled: interrupted by a new run, keeping ' + cores + ' threads'); return; }
+    if (benchCancelled) { benchLog('threads bench cancelled: interrupted by a new run, keeping ' + cores + ' threads — progress saved, resumes next run'); return; }
     if (!results.length) { benchLog('threads bench: no count succeeded, keeping ' + cores + ' threads'); return; }
+    const missing = counts.filter((n) => !timings[n]);
+    if (missing.length) {
+      benchLog('threads bench: ' + missing.join(', ') + ' threads not measured yet — will retry next run');
+      return;
+    }
     const minTotal = Math.min(...results.map((r) => r.totalMs));
     const best = results.filter((r) => r.totalMs <= minTotal * 1.05).sort((a, b) => a.threads - b.threads)[0];
-    const timings = {};
-    for (const r of results) timings[r.threads] = { vision: Math.round(r.visionMs * 10) / 10, prefill: Math.round(r.prefillMs * 10) / 10, step: Math.round(r.stepMs * 10) / 10, total: Math.round(r.totalMs * 10) / 10 };
     try {
       await saveMeasuredThreads({ threads: best.threads, method: 'full-chain', timings, hardwareConcurrency: cores, measuredAt: new Date().toISOString() });
     } catch {}
