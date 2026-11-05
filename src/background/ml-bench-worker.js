@@ -147,17 +147,29 @@ async function benchOne(threads, steps, warmup) {
     const prefillMs = median(prefillTimes);
     if (!past || !Object.keys(past).length) throw new Error('prefill returned no past tensors');
 
-    // --- steps: real past tensors from prefill ---
+    // --- steps: prefill past tensors, mapped POSITIONALLY (like
+    // baberu.js _decode) — the step's past input names come from its
+    // own inputNames (/past/i, fallback past_k0..5/past_v0..5) and the
+    // prefill's past outputs are outputNames.slice(1) in order. The two
+    // graphs need NOT use the same names, and in fact they do not (that
+    // is why production maps by index); mapping by name fails every
+    // count. present = the past tensors in prefill-output order.
+    const pastNames = [];
+    for (const n of stp.inputNames) if (/past/i.test(n)) pastNames.push(n);
+    if (pastNames.length !== 12) {
+      pastNames.length = 0;
+      for (let i = 0; i < 6; i++) pastNames.push('past_k' + i);
+      for (let i = 0; i < 6; i++) pastNames.push('past_v' + i);
+    }
+    const present = pre.outputNames.slice(1).map((n) => past[n]);
+    if (pastNames.length !== present.length) throw new Error('past count mismatch: step wants ' + pastNames.length + ', prefill gave ' + present.length);
     const feed = {};
     for (const name of stp.inputNames) {
       if (name === 'input_ids' || name === 'position_ids') {
         feed[name] = new ort.Tensor('int64', BigInt64Array.from([BigInt(1)]), [1, 1]);
-      } else if (past[name]) {
-        feed[name] = past[name];
-      } else if (/past/i.test(name)) {
-        throw new Error('step input "' + name + '" has no matching prefill past tensor');
       }
     }
+    for (let i = 0; i < pastNames.length && i < present.length; i++) feed[pastNames[i]] = present[i];
     if (!feed.input_ids && !Object.keys(feed).length) throw new Error('step session has no usable inputs');
     const stepTimes = [];
     try {

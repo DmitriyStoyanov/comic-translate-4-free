@@ -146,7 +146,10 @@ function benchOneCount(threads) {
     worker.onmessage = (e) => {
       const d = e && e.data;
       if (!d || d.type !== 'bench-result' || d.threads !== threads) return;
-      done(d.ok && typeof d.totalMs === 'number' ? { visionMs: d.visionMs, prefillMs: d.prefillMs, stepMs: d.stepMs, totalMs: d.totalMs } : null);
+      // Pass a worker-reported error through (truncated by the logger)
+      // so a failed count is diagnosable from the panel log instead of
+      // just 'failed' — the 2.0.20 all-failed run gave no reason.
+      done(d.ok && typeof d.totalMs === 'number' ? { visionMs: d.visionMs, prefillMs: d.prefillMs, stepMs: d.stepMs, totalMs: d.totalMs } : { error: d.error || 'unknown error' });
     };
     worker.onerror = () => done(null);
     try { worker.postMessage({ type: 'bench', threads, steps: 20, warmup: 2 }); }
@@ -201,9 +204,11 @@ async function runThreadBenchmark() {
       if (benchCancelled) break;
       const r = await benchOneCount(n);
       if (benchCancelled) break;
-      if (r != null) {
+      if (r != null && !r.error && typeof r.totalMs === 'number') {
         results.push({ threads: n, ...r });
         benchLog('threads bench ' + n + ' threads: vision ' + Math.round(r.visionMs) + 'ms prefill ' + Math.round(r.prefillMs) + 'ms step ' + Math.round(r.stepMs * 10) / 10 + 'ms/step total ' + Math.round(r.totalMs) + 'ms/crop');
+      } else if (r && r.error) {
+        benchLog('threads bench ' + n + ' threads: failed: ' + String(r.error).slice(0, 120));
       } else {
         benchLog('threads bench ' + n + ' threads: failed');
       }
