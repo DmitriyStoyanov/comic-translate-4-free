@@ -157,6 +157,37 @@ function benchOneCount(threads) {
   });
 }
 
+// 2.0.24: bench keepalive — held ONLY while the benchmark measures.
+// The bench runs in a background offscreen doc the browser can
+// freeze/throttle when idle (James: >10 min, still no result). An open
+// runtime Port to a DIFFERENT context, with heartbeat messages across
+// it, is the documented activity that keeps an event page / worker
+// alive; a silent self-connect is not (see the FIX3 comment in
+// service-worker.js — the SW accepts this Port name). The doc opens the
+// Port when the bench starts measuring and disconnects it when the
+// bench ends or is cancelled, so the hold exists only for the
+// measurement — never always-on. Best-effort: if the Port cannot open,
+// the bench still runs (and still resumes, 2.0.23).
+let benchKeepAlivePort = null;
+let benchKeepAliveTimer = null;
+function benchKeepAliveStart() {
+  try {
+    if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.connect) return;
+    const port = chrome.runtime.connect({ name: 'ct-bench-keepalive' });
+    benchKeepAlivePort = port;
+    try { port.onDisconnect.addListener(() => { if (benchKeepAlivePort === port) benchKeepAlivePort = null; }); } catch {}
+    try {
+      benchKeepAliveTimer = setInterval(() => {
+        try { if (benchKeepAlivePort) benchKeepAlivePort.postMessage({ beat: Date.now() }); } catch {}
+      }, 20000);
+    } catch {}
+  } catch {}
+}
+function benchKeepAliveStop() {
+  try { if (benchKeepAliveTimer) { clearInterval(benchKeepAliveTimer); benchKeepAliveTimer = null; } } catch {}
+  try { if (benchKeepAlivePort) { benchKeepAlivePort.disconnect(); benchKeepAlivePort = null; } } catch {}
+}
+
 // Chrome 2.0.13: measure the best WASM thread count once, in the
 // background. Counts tried: a doubling spread up to the core count
 // (2.0.15: 10 cores -> 1,2,4,8,10; 18 cores -> 1,2,4,8,16,18).
@@ -227,6 +258,7 @@ async function runThreadBenchmark() {
     const remaining = counts.filter((n) => !timings[n]);
     if (remaining.length) {
       benchLog('threads bench started, testing ' + remaining.join(', ') + ' threads' + (results.length ? ' (resuming, ' + results.length + ' already measured)' : ''));
+      benchKeepAliveStart(); // 2.0.24: hold the doc awake only while measuring
     } else {
       benchLog('threads bench resuming, all counts already measured — picking the winner');
     }
@@ -261,6 +293,7 @@ async function runThreadBenchmark() {
     } catch {}
     benchLog('threads bench best ' + best.threads + ' threads (was ' + cores + '), total ' + Math.round(best.totalMs) + 'ms/crop — used from the next run');
   } finally {
+    benchKeepAliveStop(); // 2.0.24: release the measurement-only hold (also on cancel)
     benchRunning = false;
     benchCancelled = false;
   }

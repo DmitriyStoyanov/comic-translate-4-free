@@ -662,9 +662,15 @@ function keepAliveStop(runId) {
 // not. Held in keepAliveIncoming so it is not GC'd. Heartbeats are
 // activity only — never logged per-beat (that would flood the panel
 // log) and never touch runs or ML.
+// 2.0.24: also accept the benchmark keep-alive Port
+// (ct-bench-keepalive). The offscreen doc opens it only while the
+// thread benchmark measures and heartbeats every 20s, so the doc is
+// not frozen/throttled mid-measurement; it disconnects when the bench
+// ends or is cancelled. Same rule as the run keep-alive: a Port from a
+// different context, with messages across it.
 if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onConnect) {
   chrome.runtime.onConnect.addListener((port) => {
-    if (!port || (port.name !== 'ct-keepalive' && port.name !== 'ct-keepalive-tab')) return;
+    if (!port || (port.name !== 'ct-keepalive' && port.name !== 'ct-keepalive-tab' && port.name !== 'ct-bench-keepalive')) return;
     keepAliveIncoming.add(port);
     diagPush('keepalive port connected name ' + port.name);
     try { port.onMessage.addListener(() => { /* heartbeat activity only */ }); } catch {}
