@@ -1,18 +1,25 @@
 name: Build Firefox release zip
 
-# Split from Chrome (2026-11-03): Chrome and Firefox have independent
-# versions and releases now. Firefox stays 1.4.x (needed patches only).
+# Browser-only releases (2026-11-05, James's decision): Chrome and
+# Firefox have independent versions, but there are no version tags or
+# version releases anymore — only the "Chrome" and "Firefox" moving
+# tags and their releases, so the Releases page shows just the two
+# latest builds. Rollback is via git itself (the old version tags are
+# kept as labels on old commits, and any commit can be checked out);
+# it is very rarely needed.
 # On every push to main: build the Firefox zip and upload it as a workflow
 # artifact, so a fresh Firefox zip always exists.
-# On every Firefox version tag push (v1.4.*): additionally attach the
-# Firefox zip to the GitHub Release, so users can download it without
-# building.
+# On every Firefox tag push: build the Firefox zip and update the
+# "Firefox" release (replace the old zip, update the notes to the new
+# version from manifest.firefox.json), so the release always holds the
+# latest Firefox build. There are only two releases (Chrome + Firefox),
+# so the updated release is always visible — no delete/recreate needed.
 on:
   push:
     branches:
       - main
     tags:
-      - 'v1.4.*'
+      - 'Firefox'
 
 jobs:
   build:
@@ -37,9 +44,17 @@ jobs:
             dist/*-firefox.zip
           if-no-files-found: error
 
-      - name: Attach Firefox zip to the release
-        if: startsWith(github.ref, 'refs/tags/v1.4.')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*-firefox.zip
-          generate_release_notes: true
+      - name: Update the Firefox release
+        if: github.ref == 'refs/tags/Firefox'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(node -p "require('./manifest.firefox.json').version")
+          ZIP="dist/comic-translate-4-free-v${VERSION}-firefox.zip"
+          # Replace the old zip (keep only the latest build in the release)
+          for asset in $(gh release view Firefox --json assets --jq '.assets[].name' 2>/dev/null); do
+            gh release delete-asset Firefox "$asset" --yes
+          done
+          gh release upload Firefox "$ZIP" --clobber
+          NOTES=$(printf 'Latest Firefox build: v%s.\n\nThis tag always points to the newest Firefox release. The zip here is the current Firefox build.' "$VERSION")
+          gh release edit Firefox --title "Firefox" --notes "$NOTES"

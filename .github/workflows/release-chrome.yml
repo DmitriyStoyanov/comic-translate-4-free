@@ -1,17 +1,25 @@
 name: Build Chrome release zip
 
-# Split from Firefox (2026-11-03): Chrome and Firefox have independent
-# versions and releases now. Chrome is 2.x (GPU speed line).
+# Browser-only releases (2026-11-05, James's decision): Chrome and
+# Firefox have independent versions, but there are no version tags or
+# version releases anymore — only the "Chrome" and "Firefox" moving
+# tags and their releases, so the Releases page shows just the two
+# latest builds. Rollback is via git itself (the old version tags are
+# kept as labels on old commits, and any commit can be checked out);
+# it is very rarely needed.
 # On every push to main: build the Chrome zip and upload it as a workflow
 # artifact, so a fresh Chrome zip always exists.
-# On every Chrome version tag push (v2.*): additionally attach the Chrome
-# zip to the GitHub Release, so users can download it without building.
+# On every Chrome tag push: build the Chrome zip and update the
+# "Chrome" release (replace the old zip, update the notes to the new
+# version from manifest.json), so the release always holds the latest
+# Chrome build. There are only two releases (Chrome + Firefox), so the
+# updated release is always visible — no delete/recreate needed.
 on:
   push:
     branches:
       - main
     tags:
-      - 'v2.*'
+      - 'Chrome'
 
 jobs:
   build:
@@ -36,9 +44,17 @@ jobs:
             dist/*-chrome.zip
           if-no-files-found: error
 
-      - name: Attach Chrome zip to the release
-        if: startsWith(github.ref, 'refs/tags/v2.')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*-chrome.zip
-          generate_release_notes: true
+      - name: Update the Chrome release
+        if: github.ref == 'refs/tags/Chrome'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(node -p "require('./manifest.json').version")
+          ZIP="dist/comic-translate-4-free-v${VERSION}-chrome.zip"
+          # Replace the old zip (keep only the latest build in the release)
+          for asset in $(gh release view Chrome --json assets --jq '.assets[].name' 2>/dev/null); do
+            gh release delete-asset Chrome "$asset" --yes
+          done
+          gh release upload Chrome "$ZIP" --clobber
+          NOTES=$(printf 'Latest Chrome build: v%s.\n\nThis tag always points to the newest Chrome release. The zip here is the current Chrome build.' "$VERSION")
+          gh release edit Chrome --title "Chrome" --notes "$NOTES"
