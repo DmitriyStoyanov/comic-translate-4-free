@@ -189,8 +189,13 @@ function benchKeepAliveStop() {
 }
 
 // Chrome 2.0.13: measure the best WASM thread count once, in the
-// background. Counts tried: a doubling spread up to the core count
-// (2.0.15: 10 cores -> 1,2,4,8,10; 18 cores -> 1,2,4,8,16,18).
+// background. Counts tried (2.0.26): start from max(3, ceil(cores/4)),
+// then 4, 5, 6, then +2 (even only) up to the total — 10 cores ->
+// 3,4,5,6,8,10; 32 cores -> 8,10,12,... Stop early when a count is
+// >10% slower than the best so far (2.0.26); after a stop, the total
+// is not tested. The old doubling spread (1,2,4,8,10) missed the
+// commonest big-core counts (6, 12). See the 2.0.26 comment below
+// for why each part of the set exists.
 // Each count times the FULL Baberu chain in its own worker (median
 // vision + median prefill + 20 steps, per representative crop; 2.0.20
 // — the old step-only timing could not prove the overall winner, since
@@ -211,14 +216,37 @@ async function runThreadBenchmark() {
   benchCancelled = false;
   try {
     const cores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
-    // Doubling spread up to the machine's core count: each step doubles
-    // the parallelism, so the curve is sampled at doubling points on any
-    // machine — 10 cores -> 1,2,4,8,10; 18 cores -> 1,2,4,8,16,18.
-    // Testing every count would take one worker per count; the curve is
-    // smooth, so doubling points are enough to find the sweet spot.
-    const counts = [];
-    for (let n = 1; n < cores; n *= 2) counts.push(n);
-    counts.push(cores);
+    // 2.0.26: new bench spread (James's design, from CPU research
+    // 2021-2026 — big-core counts cluster at 4, 6, 8, 10, 12, with
+    // 3 and 5 on binned Apple chips; big cores are at least 1/3 of
+    // total, so cores/4 is always below the big-core count; no odd
+    // big-core count above 6 exists).
+    // - 1 core: no test, use 1 thread.
+    // - 2 cores: test 1 and 2 (could be 1 big + 1 small).
+    // - 3+ cores: start from max(3, ceil(cores/4)), then 4, 5, 6,
+    //   then +2 (even only) up to the total. The total itself is
+    //   included when the run reaches it (it can be odd, e.g. 11).
+    // - Early stop (below): when a count is >10% slower than the
+    //   best so far, stop — the total is not tested after a stop.
+    //   Noise is 6-11% on the M4, so 10% avoids false stops; the
+    //   true gap from the best to the next count is 8-12%.
+    if (cores <= 1) {
+      benchLog('threads bench skipped: single core, using 1 thread');
+      try { await saveMeasuredThreads({ threads: 1, method: 'full-chain', timings: {}, hardwareConcurrency: cores, measuredAt: new Date().toISOString() }); } catch {}
+      return;
+    }
+    const benchCounts = (c) => {
+      if (c === 2) return [1, 2];
+      const start = Math.max(3, Math.ceil(c / 4));
+      const list = [];
+      let n = start;
+      while (n <= 6 && n <= c) { list.push(n); n++; }
+      if (n % 2 === 1) n++;
+      while (n <= c) { list.push(n); n += 2; }
+      if (list.length && list[list.length - 1] !== c) list.push(c);
+      return list;
+    };
+    const counts = benchCounts(cores);
     // 2.0.23: RESUMABLE. The bench runs in a background offscreen doc
     // that the browser can freeze/throttle when idle, and a new run can
     // cancel it — and until now it saved NOTHING until every count was
@@ -266,6 +294,13 @@ async function runThreadBenchmark() {
     } else {
       benchLog('threads bench resuming, all counts already measured — picking the winner');
     }
+    // 2.0.26: early stop. When a count is >10% slower than the best
+    // so far, the curve has turned — further counts only add slower
+    // efficiency cores, and the total will not recover (on the M4 the
+    // total was 17% slower than the best). Stop here and do not test
+    // the total. The 10% line is above the 6-11% measurement noise,
+    // so a noisy count does not stop the bench by itself.
+    let stoppedEarly = false;
     for (const n of remaining) {
       if (benchCancelled) break;
       const r = await benchOneCount(n);
@@ -285,6 +320,17 @@ async function runThreadBenchmark() {
           const keep = (prev && Number.isInteger(prev.threads)) ? { threads: prev.threads } : {};
           await saveMeasuredThreads({ ...keep, method: 'full-chain', timings, hardwareConcurrency: cores, measuredAt: new Date().toISOString(), partial: true });
         } catch {}
+        // 2.0.26: stop when this count is >10% slower than the best
+        // measured so far (the best includes this count, so a new
+        // best never triggers a stop — only a real decline does).
+        if (results.length > 1) {
+          const bestSoFar = Math.min(...results.map((x) => x.totalMs));
+          if (r.totalMs > bestSoFar * 1.10) {
+            stoppedEarly = true;
+            benchLog('threads bench ' + n + ' threads: ' + Math.round((r.totalMs / bestSoFar - 1) * 100) + '% slower than best — stopping early, total not tested');
+            break;
+          }
+        }
       } else if (r && r.error) {
         benchLog('threads bench ' + n + ' threads: failed: ' + String(r.error).slice(0, 120));
       } else {
@@ -294,7 +340,11 @@ async function runThreadBenchmark() {
     if (benchCancelled) { benchLog('threads bench cancelled: interrupted by a new run, keeping ' + cores + ' threads — progress saved, resumes next run'); return; }
     if (!results.length) { benchLog('threads bench: no count succeeded, keeping ' + cores + ' threads'); return; }
     const missing = counts.filter((n) => !timings[n]);
-    if (missing.length) {
+    // 2.0.26: an early stop is a decision, not a failure — the
+    // untested counts were skipped on purpose, so pick the winner
+    // from the counts actually measured and save it complete. The
+    // bench will not resume the skipped counts on the next trigger.
+    if (!stoppedEarly && missing.length) {
       benchLog('threads bench: ' + missing.join(', ') + ' threads not measured yet — will retry next run');
       return;
     }
