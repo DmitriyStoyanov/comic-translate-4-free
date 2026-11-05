@@ -7,7 +7,7 @@ import { getSettings } from '../shared/settings.js';
 import {
   makeTextBlock, mergeOverlappingBoxes, sortBlocks,
   boxIoU, clampBox, dedupAndMergeSeams, mergeBoxesByCost,
-  INPAINT_COST, TILE_MAX,
+  INPAINT_COST, INPAINT_COST_SPREAD, patchCostMs, TILE_MAX,
 } from '../shared/textblock.js';
 import { toGrayU8, meanBrightness, renderScale, resizeBilinearRGBA } from '../shared/image-ops.js';
 import { pixelPut, pixelTake, pixelDrop, pixelPruneRun } from '../shared/pixel-bus.js';
@@ -45,6 +45,47 @@ function diagPush(line) {
     diagLogBuf.push('[ct-diag] ' + line);
     if (diagLogBuf.length > 200) diagLogBuf.shift();
   } catch {}
+}
+
+// 2.0.27: LEARNED inpaint merge spread. The merge charges a merged
+// patch at perPxMs * spread (textblock.js) — the spread is how much
+// more a big tile costs per pixel than a small one. It was a fixed
+// 1.3, measured once on one M4 GPU and applied to every path, which
+// is a guess, not a measurement. Now each path (gpu / wasm / wasm1)
+// starts at 1.3 and learns its own value from real runs: after an
+// inpaint run, every merged patch compares its actual ms against the
+// base-model prediction (no spread); the per-pixel part of the ratio
+// is the measured spread for that patch. The stored spread moves 10%
+// toward the median ratio of the run's merged patches (damping), so
+// one noisy run cannot swing it — that is the overfitting guard, along
+// with the [1.0, 2.0] clamp and keeping the three paths separate.
+// Stored in chrome.storage.local (mirrored to sync, like the thread
+// bench) so it survives restarts; a missing value means 1.3.
+const INPAINT_SPREAD_KEY = 'inpaintSpread';
+const INPAINT_SPREAD_MIN = 1.0;
+const INPAINT_SPREAD_MAX = 2.0;
+const INPAINT_SPREAD_LEARN = 0.1;
+let inpaintSpreadCache = null;
+async function readInpaintSpread() {
+  if (inpaintSpreadCache) return inpaintSpreadCache;
+  const d = { gpu: INPAINT_COST_SPREAD, wasm: INPAINT_COST_SPREAD, wasm1: INPAINT_COST_SPREAD };
+  try {
+    const got = await chrome.storage.local.get(INPAINT_SPREAD_KEY);
+    const s = got && got[INPAINT_SPREAD_KEY];
+    if (s && typeof s === 'object') {
+      for (const k of ['gpu', 'wasm', 'wasm1']) {
+        const v = Number(s[k]);
+        if (Number.isFinite(v)) d[k] = Math.min(INPAINT_SPREAD_MAX, Math.max(INPAINT_SPREAD_MIN, v));
+      }
+    }
+  } catch {}
+  inpaintSpreadCache = d;
+  return d;
+}
+async function saveInpaintSpread(map) {
+  inpaintSpreadCache = { ...map };
+  try { await chrome.storage.local.set({ [INPAINT_SPREAD_KEY]: { ...map, updatedAt: new Date().toISOString() } }); } catch {}
+  try { await chrome.storage.sync.set({ [INPAINT_SPREAD_KEY]: { ...map, updatedAt: new Date().toISOString() } }); } catch {}
 }
 // 1.4.0 (m6): each run's (and each recovery's) panel log is its own.
 // Called at run start and at recovery start, before any diagPush for
@@ -1259,7 +1300,13 @@ async function runPipeline(tabId, opts = {}) {
       // r from the ML handler; the rest is timed here.
       let inpaintPath = 'wasm';
       let prepMs = 0, callMs = 0, pasteMs = 0, splitLoadMs = 0, splitReadyMs = null, splitTileMax = 0;
-      const { boxes: patchBoxes, predictedMs } = mergeBoxesByCost(entries, {
+      // 2.0.27: the merge uses the LEARNED spread for this path
+      // (gpu on Chrome, wasm1 on Firefox), starting at 1.3 and
+      // adjusting from real runs (see readInpaintSpread above).
+      const spreadMap = await readInpaintSpread();
+      const mergeKey = directHandlers() ? 'wasm1' : 'gpu';
+      const mergeSpread = spreadMap[mergeKey] || INPAINT_COST_SPREAD;
+      const { boxes: patchBoxes, predictedMs, counts: patchCounts } = mergeBoxesByCost(entries, {
         // 2.0.14: cost-based merge (see textblock.js) — merge only when
         // the merged patch is predicted cheaper than the two apart.
         // Expected path: Chrome tries GPU first (tileMax 1024); Firefox
@@ -1267,8 +1314,9 @@ async function runPipeline(tabId, opts = {}) {
         // to WASM on these same patches, as before.
         tileMax: directHandlers() ? TILE_MAX : 1024,
         ...(directHandlers() ? INPAINT_COST.wasm1 : INPAINT_COST.gpu),
+        spread: mergeSpread,
       });
-      diagPush('inpaint merge cost: ' + entries.length + ' boxes -> ' + patchBoxes.length + ' patches, predicted ' + Math.round(predictedMs) + 'ms');
+      diagPush('inpaint merge cost: ' + entries.length + ' boxes -> ' + patchBoxes.length + ' patches, predicted ' + Math.round(predictedMs) + 'ms (spread ' + mergeSpread.toFixed(2) + ')');
       const patches = [];
       for (const [i, pb] of patchBoxes.entries()) {
         checkCancelled(runId);
@@ -1435,6 +1483,51 @@ async function runPipeline(tabId, opts = {}) {
         if (r && Array.isArray(r.patchStats)) {
           for (const ps of r.patchStats) diagPush('inpaint patch ' + ps.id + ' ' + ps.w + 'x' + ps.h + ' tiles ' + ps.tiles + ' fast ' + (ps.fast ? 'yes' : 'no') + ' ms ' + ps.ms);
         }
+        // 2.0.27: LEARN the spread from this run's merged patches.
+        // For a merged patch, the base model (no spread) predicts
+        // patchCostMs; the per-pixel part of (actual / predicted) is
+        // the measured spread for that patch. Fast-path patches never
+        // ran the model, so they carry no signal and are skipped.
+        // Only merged patches count — a single-box patch never used
+        // the spread. The median ratio of the run moves the stored
+        // spread 10% toward it (damped, clamped), so one noisy run
+        // cannot overfit it. The key is the path that actually ran
+        // (gpu, or wasm on Chrome fallback, or wasm1 on Firefox).
+        try {
+          const actualKey = inpaintPath === 'gpu' ? 'gpu' : (directHandlers() ? 'wasm1' : 'wasm');
+          const actualCost = INPAINT_COST[actualKey] || INPAINT_COST.gpu;
+          const actualTileMax = splitTileMax || (actualKey === 'gpu' ? 1024 : TILE_MAX);
+          const ratios = [];
+          if (r && Array.isArray(r.patchStats) && Array.isArray(patchCounts)) {
+            for (const ps of r.patchStats) {
+              if (ps.fast) continue;
+              if (!patchCounts[ps.id] || patchCounts[ps.id] < 2) continue;
+              const w = Number(ps.w), h = Number(ps.h), tiles = Number(ps.tiles), ms = Number(ps.ms);
+              if (!w || !h || !tiles || !ms) continue;
+              const base = patchCostMs(w, h, actualTileMax, actualCost.fixedMs, actualCost.perPxMs);
+              const fixedPart = tiles * actualCost.fixedMs;
+              const perPxPart = base - fixedPart;
+              const actualPerPx = ms - fixedPart;
+              // Only use patches where the per-pixel part beats the fixed
+              // overhead — otherwise the ratio is noise in the fixed cost.
+              if (perPxPart <= fixedPart || actualPerPx <= 0) continue;
+              const ratio = actualPerPx / perPxPart;
+              if (Number.isFinite(ratio)) ratios.push(Math.min(3, Math.max(0.5, ratio)));
+            }
+          }
+          if (ratios.length) {
+            ratios.sort((a, b) => a - b);
+            const median = ratios[Math.floor(ratios.length / 2)];
+            const cur = (await readInpaintSpread())[actualKey] || INPAINT_COST_SPREAD;
+            const next = Math.min(INPAINT_SPREAD_MAX, Math.max(INPAINT_SPREAD_MIN, cur * (1 - INPAINT_SPREAD_LEARN) + median * INPAINT_SPREAD_LEARN));
+            if (Math.abs(next - cur) >= 0.005) {
+              const map = await readInpaintSpread();
+              map[actualKey] = Math.round(next * 100) / 100;
+              await saveInpaintSpread(map);
+              diagPush('inpaint spread ' + actualKey + ': ' + cur.toFixed(2) + ' -> ' + map[actualKey].toFixed(2) + ' (n=' + ratios.length + ' median ratio ' + median.toFixed(2) + ')');
+            }
+          }
+        } catch {}
       }
       const totalInpaintMs = Math.round(performance.now() - t0i);
       if (patches.length) diagPush('inpaint split path ' + inpaintPath + ' ms prep ' + prepMs + ' load ' + splitLoadMs + ' gpu ' + inpaintMs + ' paste ' + pasteMs + ' call ' + callMs + ' total ' + totalInpaintMs + (splitReadyMs != null ? ' readyMs ' + splitReadyMs : '') + (splitTileMax ? ' tileMax ' + splitTileMax : ''));

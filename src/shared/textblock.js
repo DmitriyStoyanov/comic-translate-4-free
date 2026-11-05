@@ -257,10 +257,14 @@ export function patchCostMs(w, h, tileMax, fixedMs, perPxMs) {
 // almost no area, so the saved fixed cost wins); distant boxes never do
 // (the gap area costs more than the saved fixed cost). No distance number,
 // no tuned threshold — the threshold comes from the cost model.
-// Returns { boxes: [[x1,y1,x2,y2], ...], predictedMs } (predictedMs is the
-// sum of patchCostMs at perPxMs for the final boxes).
+// Returns { boxes: [[x1,y1,x2,y2], ...], predictedMs, counts }
+// (predictedMs is the sum of patchCostMs at perPxMs for the final boxes;
+// counts[i] is how many original entries final box i holds — 1 means it
+// was never merged. 2.0.27: counts lets the caller learn the spread from
+// merged patches only, since only a merge used the spread.)
 export function mergeBoxesByCost(entries, { tileMax, fixedMs, perPxMs, spread = INPAINT_COST_SPREAD }) {
   const boxes = entries.map((e) => e.bounds.slice());
+  const counts = entries.map(() => 1);
   const cost = (b, k) => patchCostMs(b[2] - b[0], b[3] - b[1], tileMax, fixedMs, k);
   let changed = true;
   while (changed && boxes.length > 1) {
@@ -277,11 +281,13 @@ export function mergeBoxesByCost(entries, { tileMax, fixedMs, perPxMs, spread = 
     if (bestI >= 0) {
       const a = boxes[bestI], b = boxes[bestJ];
       boxes[bestI] = [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[2], b[2]), Math.max(a[3], b[3])];
+      counts[bestI] += counts[bestJ];
       boxes.splice(bestJ, 1);
+      counts.splice(bestJ, 1);
       changed = true;
     }
   }
   let predictedMs = 0;
   for (const b of boxes) predictedMs += cost(b, perPxMs);
-  return { boxes, predictedMs };
+  return { boxes, predictedMs, counts };
 }
