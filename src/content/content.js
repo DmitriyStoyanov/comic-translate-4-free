@@ -692,7 +692,9 @@
   function renderDebugTab(stage) {
     const p = stageTabs[stage];
     if (!p) { debugBody.innerHTML = `<p style="color:#888">no data for "${esc(stage)}" yet</p>`; return; }
-    let html = `<h3 style="margin:0 0 8px">${esc(p.title || stage)}</h3>`;
+    let html = `<h3 style="margin:0 0 8px">${esc(p.title || stage)}`;
+    if (stage === 'diaglog' && p.log) html += ` <button id="ct-copy-log" style="margin-left:8px;padding:4px 8px;background:#222;border:1px solid #444;color:#ccc;border-radius:4px;cursor:pointer;font:11px sans-serif;vertical-align:middle">Copy</button>`;
+    html += `</h3>`;
     if (p.log) html += `<pre style="white-space:pre-wrap;word-break:break-all;color:#ddd;font:11px monospace;max-height:60vh;overflow:auto;border:1px solid #444;padding:8px">${esc(p.log)}</pre>`;
     if (p.totalMs != null) {
       html += `<p style="color:#eee;font-size:14px;margin:0 0 4px">total: <b>${p.totalMs}ms</b>`;
@@ -749,6 +751,22 @@
         ).join('') + '</table>';
     }
     debugBody.innerHTML = html;
+    // Copy button (diaglog tab only): copies the full log text.
+    const copyBtn = debugBody.querySelector('#ct-copy-log');
+    if (copyBtn) {
+      copyBtn.onclick = async () => {
+        const done = (t) => { copyBtn.textContent = t; setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500); };
+        try { await navigator.clipboard.writeText(p.log); done('Copied'); }
+        catch {
+          try {
+            const ta = document.createElement('textarea');
+            ta.value = p.log; document.body.appendChild(ta); ta.select();
+            document.execCommand('copy'); ta.remove();
+            done('Copied');
+          } catch { done('Copy failed'); }
+        }
+      };
+    }
   }
 
   // ------------------------------------------------------------ messages
