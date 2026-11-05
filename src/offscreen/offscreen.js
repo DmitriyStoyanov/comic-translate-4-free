@@ -8,7 +8,7 @@ import { ALL_FILES, downloadFileToIdb, readChunked, ocrEngineForLang, BABERU_VOC
 import { Detector } from './ml/detector.js';
 import { BaberuOCR } from './ml/baberu.js';
 import { meanBrightness } from '../shared/image-ops.js';
-import { Inpainter, tileOrigins } from './ml/inpaint.js';
+import { Inpainter, tileOrigins, TILE_MAX } from './ml/inpaint.js';
 import { pixelPut, pixelPeek } from '../shared/pixel-bus.js';
 
 // Worker-safe: a Firefox inpaint worker imports this module, and a worker
@@ -463,7 +463,7 @@ const handlers = {
       }
     });
     armChromeGpuIdleTimer();
-    return { ok: true, results: (res && res.results) || [], ms: (res && res.ms) || 0, totalTiles: (res && res.totalTiles) || 0, readyMs, loadMs: (res && res.loadMs) || 0, patchStats: (res && res.patchStats) || [] };
+    return { ok: true, results: (res && res.results) || [], ms: (res && res.ms) || 0, totalTiles: (res && res.totalTiles) || 0, readyMs, loadMs: (res && res.loadMs) || 0, patchStats: (res && res.patchStats) || [], tileMax: (res && res.tileMax) || 0 };
   },
 
   async [MSG.ML_DETECT]({ key, width, height, threshold, runId, noStrip }) {
@@ -512,7 +512,6 @@ const handlers = {
     const loadMs = Math.round(performance.now() - loadT0);
     throwIfCancelled(runId);
     const t0 = performance.now();
-    const results = [];
     // Stddev of a crop's grayscale pixels, sampled every 4th pixel. A
     // near-uniform crop (detector false positive on flat background) scores
     // ~1-2 from JPEG noise alone; real text — even faint — scores 30+ from
@@ -528,8 +527,21 @@ const handlers = {
       }
       return n > 1 ? Math.sqrt(m2 / (n - 1)) : 0;
     };
-    try {
-      for (const c of crops) {
+    // DIAG-EXP (2.0.10): OCR crops run 2 at a time. Baberu decodes one
+    // token at a time per crop and a single crop does not fill 10 WASM
+    // threads, so two crops share the threads better. _decode keeps all
+    // decode state (KV cache, logits, seq) in locals; only the three
+    // sessions are shared, and concurrent session.run calls carry their
+    // own feed tensors. Batching is still impossible (batch=1 baked into
+    // the graphs, see baberu.js) — this is concurrency, not batching.
+    const OCR_CONCURRENCY = 2;
+    const results = new Array(crops.length);
+    let nextCrop = 0;
+    const runOneCrop = async () => {
+      for (;;) {
+        const idx = nextCrop++;
+        if (idx >= crops.length) return;
+        const c = crops[idx];
         throwIfCancelled(runId);
         // DIAG (2.0.9): per-crop ms — Baberu is autoregressive, so time
         // grows with output tokens; one long crop can dominate the stage.
@@ -540,7 +552,7 @@ const handlers = {
         // vision+prefill+autoregressive steps. Empty text flows downstream
         // exactly as if OCR had returned ''.
         if (cropStddev(u8) < 3.0) {
-          results.push({ id: c.id, text: '', chars: 0, chunks: 0, hitCeiling: false, stopped: 'eos', skipped: true, ms: Math.round(performance.now() - cT0) });
+          results[idx] = { id: c.id, text: '', chars: 0, chunks: 0, hitCeiling: false, stopped: 'eos', skipped: true, ms: Math.round(performance.now() - cT0) };
           continue;
         }
         // Baberu v1.1 reads up to ~256 chars; the chunked path is a rare
@@ -566,8 +578,13 @@ const handlers = {
             shouldAbort: () => cancelledRuns.has(runId),
           });
         }
-        results.push({ id: c.id, text: r.text, chars: r.text.length, chunks: r.chunks, hitCeiling: r.hitCeiling, stopped: r.stopped, ms: Math.round(performance.now() - cT0) });
+        results[idx] = { id: c.id, text: r.text, chars: r.text.length, chunks: r.chunks, hitCeiling: r.hitCeiling, stopped: r.stopped, ms: Math.round(performance.now() - cT0) };
       }
+    };
+    try {
+      const workers = [];
+      for (let w = 0; w < Math.min(OCR_CONCURRENCY, crops.length); w++) workers.push(runOneCrop());
+      await Promise.all(workers);
     } finally {
       releaseRun(runId);
     }
@@ -608,16 +625,24 @@ const handlers = {
     const loadT0 = performance.now();
     await ensureModel('inpaint');
     const loadMs = Math.round(performance.now() - loadT0);
+    // DIAG-EXP (2.0.10): GPU tiles are 1024, WASM tiles stay 512. The 512
+    // cap exists because a WASM run blocks its thread (on Firefox, the
+    // main thread) — a 1024 WASM tile would stall progress and the
+    // watchdog. A WebGPU run is async, so the cap does not apply there,
+    // and 1024 halves the overlap waste (8 tiles -> 2 for a 686x1623
+    // patch) and the per-run overhead. The size follows the provider
+    // actually running, so the WASM fallback keeps 512 automatically.
+    const tileMax = providersFor('inpaint')[0] === 'webgpu' ? 1024 : TILE_MAX;
     throwIfCancelled(runId);
     const t0 = performance.now();
     const results = [];
     // MEASURE1: total LaMa tiles across all patches, by the same
-    // tileOrigins math inpaintPatch uses (a patch fitting TILE_MAX is
+    // tileOrigins math inpaintPatch uses (a patch fitting tileMax is
     // 1 tile, otherwise xs * ys). Fast-path patches still count: this
     // is the tiling shape of the page, not a LaMa-run counter.
     let totalTiles = 0;
     try {
-      for (const p of patches) totalTiles += tileOrigins(p.width).length * tileOrigins(p.height).length;
+      for (const p of patches) totalTiles += tileOrigins(p.width, tileMax).length * tileOrigins(p.height, tileMax).length;
     } catch { totalTiles = 0; }
     // DIAGNOSTIC (temporary): total work, so the log shows how many
     // patches the run had (not a guessed count).
@@ -655,7 +680,8 @@ const handlers = {
             out = await inpainter.inpaintPatch(
               rgba, mask, p.width, p.height,
               () => cancelledRuns.has(runId),
-              (done, total) => reportInpaint((pi + done / total) / patches.length));
+              (done, total) => reportInpaint((pi + done / total) / patches.length),
+              tileMax);
           } catch (e) {
             // WebGPU run failure recovery: if LaMa is on WebGPU, ANY
             // run failure downgrades it to WASM, reloads, and retries
@@ -692,21 +718,22 @@ const handlers = {
             out = await inpainter.inpaintPatch(
               rgba, mask, p.width, p.height,
               () => cancelledRuns.has(runId),
-              (done, total) => reportInpaint((pi + done / total) / patches.length));
+              (done, total) => reportInpaint((pi + done / total) / patches.length),
+              tileMax);
           }
         }
         const resKey = p.key + ':out' + outSuffix;
         await pixelPut(resKey, out.buffer);
         results.push({ id: p.id, key: resKey, width: p.width, height: p.height });
         let pTiles = 0;
-        try { pTiles = tileOrigins(p.width).length * tileOrigins(p.height).length; } catch { pTiles = 0; }
+        try { pTiles = tileOrigins(p.width, tileMax).length * tileOrigins(p.height, tileMax).length; } catch { pTiles = 0; }
         patchStats.push({ id: p.id, w: p.width, h: p.height, tiles: pTiles, fast: !!bgFill, ms: Math.round(performance.now() - pT0) });
         reportInpaint((pi + 1) / patches.length);
       }
     } finally {
       releaseRun(runId);
     }
-    return { ok: true, results, ms: Math.round(performance.now() - t0), totalTiles, loadMs, patchStats };
+    return { ok: true, results, ms: Math.round(performance.now() - t0), totalTiles, loadMs, patchStats, tileMax };
   },
 };
 

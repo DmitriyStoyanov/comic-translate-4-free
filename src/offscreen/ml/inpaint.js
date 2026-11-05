@@ -20,19 +20,22 @@ import { toNCHW, padToMod } from '../../shared/image-ops.js';
 // no progress updates, so a slow 1024 tile looked like a silent hang. At
 // 512 each tile costs about a quarter of the time, so the 90s timeout and
 // per-tile progress get chances to fire between tiles.
+// That cap is for WASM only. A WebGPU run is async, so the handler passes
+// tileMax 1024 when the provider is webgpu (2.0.10): fewer tiles, less
+// overlap waste, fewer per-run overheads. WASM keeps 512.
 export const TILE_MAX = 512;
 const TILE_OVERLAP = 128;
 
 // Tile origins/sizes covering [0, len): first tile starts at 0, last ends at
-// len, neighbours overlap by >= TILE_OVERLAP, no tile exceeds TILE_MAX.
-export function tileOrigins(len) {
-  if (len <= TILE_MAX) return [{ o: 0, n: len }];
-  const step = TILE_MAX - TILE_OVERLAP;
+// len, neighbours overlap by >= TILE_OVERLAP, no tile exceeds tileMax.
+export function tileOrigins(len, tileMax = TILE_MAX) {
+  if (len <= tileMax) return [{ o: 0, n: len }];
+  const step = tileMax - TILE_OVERLAP;
   const count = Math.ceil((len - TILE_OVERLAP) / step);
   const tiles = [];
   for (let i = 0; i < count; i++) {
-    const o = Math.round(i * (len - TILE_MAX) / (count - 1));
-    tiles.push({ o, n: Math.min(TILE_MAX, len - o) });
+    const o = Math.round(i * (len - tileMax) / (count - 1));
+    tiles.push({ o, n: Math.min(tileMax, len - o) });
   }
   return tiles;
 }
@@ -75,7 +78,7 @@ export class Inpainter {
   // are tiled (see above); isCancelled is an optional () => bool checked
   // between tiles, onProgress an optional (done, total) => void called per
   // tile so long inpaints stay visible instead of looking stalled.
-  async inpaintPatch(rgba, mask01, w, h, isCancelled, onProgress) {
+  async inpaintPatch(rgba, mask01, w, h, isCancelled, onProgress, tileMax = TILE_MAX) {
     // NOTE (1.2.11): half-resolution for large patches (1.2.9) is removed.
     // 1.2.8 (threads on, full-res) works; 1.2.9 (threads on, half-res)
     // stalled mid-run at 73-75%. A Node harness with a mocked model proves
@@ -83,8 +86,8 @@ export class Inpainter {
     // for all sizes, so the hang is at the ORT/WASM level on half-res
     // shapes — and the one retry uses the same shapes, so it hangs again.
     // Do not reintroduce half-res without a verified-safe variant.
-    if (w <= TILE_MAX && h <= TILE_MAX) return this.inpaintPatchSingle(rgba, mask01, w, h);
-    return this.inpaintPatchTiled(rgba, mask01, w, h, isCancelled, onProgress);
+    if (w <= tileMax && h <= tileMax) return this.inpaintPatchSingle(rgba, mask01, w, h);
+    return this.inpaintPatchTiled(rgba, mask01, w, h, isCancelled, onProgress, tileMax);
   }
 
   // One LaMa run on a patch that fits in TILE_MAX. Unchanged port logic.
@@ -126,14 +129,14 @@ export class Inpainter {
     return res;
   }
 
-  // Full-resolution tiled inpaint for patches larger than TILE_MAX.
+  // Full-resolution tiled inpaint for patches larger than tileMax.
   // Tiles overlap by >= TILE_OVERLAP and are combined with an online
   // weighted average: each tile's weight ramps linearly 0 -> 1 over the
   // overlap zone at its interior edges, so seams crossfade instead of
   // cutting. Only one tile's LaMa run is live at a time, bounding peak
   // WASM memory; out/wsum are plain JS arrays.
-  async inpaintPatchTiled(rgba, mask01, w, h, isCancelled, onProgress) {
-    const xs = tileOrigins(w), ys = tileOrigins(h);
+  async inpaintPatchTiled(rgba, mask01, w, h, isCancelled, onProgress, tileMax = TILE_MAX) {
+    const xs = tileOrigins(w, tileMax), ys = tileOrigins(h, tileMax);
     const total = xs.length * ys.length;
     let done = 0;
     const out = new Uint8ClampedArray(w * h * 4);

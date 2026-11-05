@@ -1242,7 +1242,7 @@ async function runPipeline(tabId, opts = {}) {
       // paste / round-trip call / stage total). loadMs/readyMs ride on
       // r from the ML handler; the rest is timed here.
       let inpaintPath = 'wasm';
-      let prepMs = 0, callMs = 0, pasteMs = 0, splitLoadMs = 0, splitReadyMs = null;
+      let prepMs = 0, callMs = 0, pasteMs = 0, splitLoadMs = 0, splitReadyMs = null, splitTileMax = 0;
       const patchBoxes = mergePaddedBoxes(entries, 8, w, h);
       const patches = [];
       for (const [i, pb] of patchBoxes.entries()) {
@@ -1387,6 +1387,7 @@ async function runPipeline(tabId, opts = {}) {
         callMs = Math.round(performance.now() - callT0);
         splitLoadMs = (r && r.loadMs) || 0;
         splitReadyMs = (r && r.readyMs != null) ? r.readyMs : null;
+        splitTileMax = (r && r.tileMax) || 0;
         // MEASURE1: tile shape of this page, from the handler's count.
         if (r && typeof r.totalTiles === 'number') diagPush('inpaint tiles total ' + r.totalTiles + ' patches ' + patches.length);
         const pasteT0 = performance.now();
@@ -1411,7 +1412,7 @@ async function runPipeline(tabId, opts = {}) {
         }
       }
       const totalInpaintMs = Math.round(performance.now() - t0i);
-      if (patches.length) diagPush('inpaint split path ' + inpaintPath + ' ms prep ' + prepMs + ' load ' + splitLoadMs + ' gpu ' + inpaintMs + ' paste ' + pasteMs + ' call ' + callMs + ' total ' + totalInpaintMs + (splitReadyMs != null ? ' readyMs ' + splitReadyMs : ''));
+      if (patches.length) diagPush('inpaint split path ' + inpaintPath + ' ms prep ' + prepMs + ' load ' + splitLoadMs + ' gpu ' + inpaintMs + ' paste ' + pasteMs + ' call ' + callMs + ' total ' + totalInpaintMs + (splitReadyMs != null ? ' readyMs ' + splitReadyMs : '') + (splitTileMax ? ' tileMax ' + splitTileMax : ''));
       parProgress('inpaint', 1);
       await emitDebug(runId, tabId, settings, 'inpaint', {
         title: `Inpaint — ${patches.length} patches`,
