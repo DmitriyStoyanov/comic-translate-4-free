@@ -463,7 +463,7 @@ const handlers = {
       }
     });
     armChromeGpuIdleTimer();
-    return { ok: true, results: (res && res.results) || [], ms: (res && res.ms) || 0, totalTiles: (res && res.totalTiles) || 0, readyMs, loadMs: (res && res.loadMs) || 0 };
+    return { ok: true, results: (res && res.results) || [], ms: (res && res.ms) || 0, totalTiles: (res && res.totalTiles) || 0, readyMs, loadMs: (res && res.loadMs) || 0, patchStats: (res && res.patchStats) || [] };
   },
 
   async [MSG.ML_DETECT]({ key, width, height, threshold, runId, noStrip }) {
@@ -622,9 +622,14 @@ const handlers = {
     const reportInpaint = (frac) => {
       try { if (globalThis.__ctInpaintProgress) globalThis.__ctInpaintProgress(runId, frac); } catch { /* never break inpaint */ }
     };
+    // DIAG (2.0.8): per-patch time, so one Mac run shows whether the
+    // GPU tile time is one big patch, even per-tile cost, or fast-path
+    // hits — the fix depends on which it is.
+    const patchStats = [];
     try {
       for (const [pi, p] of patches.entries()) {
         throwIfCancelled(runId);
+        const pT0 = performance.now();
         const rgbaRaw = await pixelPeek(p.key);
         const maskRaw = await pixelPeek(p.maskKey);
         const rgba = new Uint8ClampedArray(rgbaRaw);
@@ -685,12 +690,15 @@ const handlers = {
         const resKey = p.key + ':out' + outSuffix;
         await pixelPut(resKey, out.buffer);
         results.push({ id: p.id, key: resKey, width: p.width, height: p.height });
+        let pTiles = 0;
+        try { pTiles = tileOrigins(p.width).length * tileOrigins(p.height).length; } catch { pTiles = 0; }
+        patchStats.push({ id: p.id, w: p.width, h: p.height, tiles: pTiles, fast: !!bgFill, ms: Math.round(performance.now() - pT0) });
         reportInpaint((pi + 1) / patches.length);
       }
     } finally {
       releaseRun(runId);
     }
-    return { ok: true, results, ms: Math.round(performance.now() - t0), totalTiles, loadMs };
+    return { ok: true, results, ms: Math.round(performance.now() - t0), totalTiles, loadMs, patchStats };
   },
 };
 

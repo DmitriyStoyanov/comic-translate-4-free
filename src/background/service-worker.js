@@ -1382,6 +1382,11 @@ async function runPipeline(tabId, opts = {}) {
             p.x, p.y);
         }
         pasteMs = Math.round(performance.now() - pasteT0);
+        // DIAG (2.0.8): one line per patch — size, tile count, fast-path
+        // hit, and ms — so the fix follows the real shape, not a guess.
+        if (r && Array.isArray(r.patchStats)) {
+          for (const ps of r.patchStats) diagPush('inpaint patch ' + ps.id + ' ' + ps.w + 'x' + ps.h + ' tiles ' + ps.tiles + ' fast ' + (ps.fast ? 'yes' : 'no') + ' ms ' + ps.ms);
+        }
       }
       const totalInpaintMs = Math.round(performance.now() - t0i);
       if (patches.length) diagPush('inpaint split path ' + inpaintPath + ' ms prep ' + prepMs + ' load ' + splitLoadMs + ' gpu ' + inpaintMs + ' paste ' + pasteMs + ' call ' + callMs + ' total ' + totalInpaintMs + (splitReadyMs != null ? ' readyMs ' + splitReadyMs : ''));
