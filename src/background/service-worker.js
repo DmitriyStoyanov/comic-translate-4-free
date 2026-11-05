@@ -1199,6 +1199,12 @@ async function runPipeline(tabId, opts = {}) {
       checkCancelled(runId);
       parProgress('inpaint', 0);
       const t0i = performance.now();
+      // DIAG (2.0.5): phase split of the inpaint stage, so one Mac run
+      // shows where the stage time goes (prep / model load / GPU run /
+      // paste / round-trip call / stage total). loadMs/readyMs ride on
+      // r from the ML handler; the rest is timed here.
+      let inpaintPath = 'wasm';
+      let prepMs = 0, callMs = 0, pasteMs = 0, splitLoadMs = 0, splitReadyMs = null;
       const patchBoxes = mergePaddedBoxes(entries, 8, w, h);
       const patches = [];
       for (const [i, pb] of patchBoxes.entries()) {
@@ -1217,6 +1223,7 @@ async function runPipeline(tabId, opts = {}) {
         await pixelPut(maskKey, maskData.buffer);
         patches.push({ id: i, x: x1, y: y1, key: pxKey, maskKey, maskData, width: x2 - x1, height: y2 - y1 });
       }
+      prepMs = Math.round(performance.now() - t0i);
       const inpainted = new Uint8ClampedArray(rgba);
       let inpaintMs = 0;
       // GPU1 per-run downgrade: set on any GPU failure (error or hang),
@@ -1240,6 +1247,7 @@ async function runPipeline(tabId, opts = {}) {
         // the GPU1-Chrome branch below (offscreen-document GPU worker).
         // If WebGPU is not exposed, one line explains why GPU was
         // skipped, so a missing navigator.gpu is visible, not silent.
+        const callT0 = performance.now();
         if (directHandlers() && !gpuDowngradedThisRun && !(typeof navigator !== 'undefined' && navigator.gpu)) {
           diagPush('inpaint gpu skipped: no navigator.gpu, using WASM/pool path');
         }
@@ -1252,10 +1260,12 @@ async function runPipeline(tabId, opts = {}) {
               diag: diagPush,
               isCancelled: () => runs.get(runId)?.cancelled === true,
             });
+            inpaintPath = 'gpu';
             diagPush('inpaint gpu done ms ' + r.ms + ' totalTiles ' + (r.totalTiles || 0));
           } catch (e) {
             checkCancelled(runId);
             gpuDowngradedThisRun = true;
+            inpaintPath = 'gpu-failed-wasm';
             diagPush('inpaint gpu failed, downgrading to WASM for this run: ' + String((e && e.message) || e));
             r = await callMlChecked(runId, { type: MSG.ML_INPAINT, runId, patches: wirePatches });
             diagPush('inpaint gpu WASM retry done ms ' + r.ms + ' totalTiles ' + (r.totalTiles || 0));
@@ -1281,14 +1291,17 @@ async function runPipeline(tabId, opts = {}) {
               diag: diagPush,
               isCancelled: () => runs.get(runId)?.cancelled === true,
             });
+            inpaintPath = 'gpu';
             diagPush('inpaint gpu done ms ' + r.ms + ' totalTiles ' + (r.totalTiles || 0) + (r.readyMs != null ? ' readyMs ' + r.readyMs : ''));
           } catch (e) {
             checkCancelled(runId);
             if (e && e.gpuSkipped) {
+              inpaintPath = 'gpu-skipped-wasm';
               diagPush('inpaint gpu skipped: ' + String((e && e.message) || e));
               r = await callMlChecked(runId, { type: MSG.ML_INPAINT, runId, patches: wirePatches });
             } else {
               gpuDowngradedThisRun = true;
+              inpaintPath = 'gpu-failed-wasm';
               diagPush('inpaint gpu failed, downgrading to WASM for this run: ' + String((e && e.message) || e));
               r = await callMlChecked(runId, { type: MSG.ML_INPAINT, runId, patches: wirePatches });
               diagPush('inpaint gpu WASM retry done ms ' + r.ms + ' totalTiles ' + (r.totalTiles || 0));
@@ -1317,9 +1330,11 @@ async function runPipeline(tabId, opts = {}) {
                 diag: diagPush,
                 isCancelled: () => runs.get(runId)?.cancelled === true,
               });
+              inpaintPath = 'pool';
               diagPush('inpaint pool done ms ' + r.ms + ' totalTiles ' + (r.totalTiles || 0));
             } catch (e) {
               checkCancelled(runId);
+              inpaintPath = 'pool-failed-single';
               diagPush('inpaint pool ' + (e && e.poolCreationFailed ? 'creation failed' : 'group failed') + ', falling back to single: ' + String((e && e.message) || e).slice(0, 120));
               r = await callMlChecked(runId, { type: MSG.ML_INPAINT, runId, patches: wirePatches });
             }
@@ -1331,8 +1346,12 @@ async function runPipeline(tabId, opts = {}) {
           });
         }
         inpaintMs = r.ms;
+        callMs = Math.round(performance.now() - callT0);
+        splitLoadMs = (r && r.loadMs) || 0;
+        splitReadyMs = (r && r.readyMs != null) ? r.readyMs : null;
         // MEASURE1: tile shape of this page, from the handler's count.
         if (r && typeof r.totalTiles === 'number') diagPush('inpaint tiles total ' + r.totalTiles + ' patches ' + patches.length);
+        const pasteT0 = performance.now();
         for (const res of r.results) {
           const p = patches[res.id];
           pxKeys.push(res.key);
@@ -1346,8 +1365,10 @@ async function runPipeline(tabId, opts = {}) {
             { data: p.maskData, w: p.width, h: p.height },
             p.x, p.y);
         }
+        pasteMs = Math.round(performance.now() - pasteT0);
       }
       const totalInpaintMs = Math.round(performance.now() - t0i);
+      if (patches.length) diagPush('inpaint split path ' + inpaintPath + ' ms prep ' + prepMs + ' load ' + splitLoadMs + ' gpu ' + inpaintMs + ' paste ' + pasteMs + ' call ' + callMs + ' total ' + totalInpaintMs + (splitReadyMs != null ? ' readyMs ' + splitReadyMs : ''));
       parProgress('inpaint', 1);
       await emitDebug(runId, tabId, settings, 'inpaint', {
         title: `Inpaint — ${patches.length} patches`,

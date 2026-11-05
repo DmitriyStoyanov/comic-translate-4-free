@@ -384,7 +384,7 @@ const handlers = {
           reject(e);
         }
       });
-      return { ok: true, results: (res && res.results) || [], ms: (res && res.ms) || 0, totalTiles: (res && res.totalTiles) || 0, readyMs };
+      return { ok: true, results: (res && res.results) || [], ms: (res && res.ms) || 0, totalTiles: (res && res.totalTiles) || 0, readyMs, loadMs: (res && res.loadMs) || 0 };
     } finally {
       // If cancel already deleted the job, this is a no-op (the worker is
       // already terminated). Otherwise terminate now: results are IDB
@@ -523,7 +523,11 @@ const handlers = {
     // The SW reads resKey from the response, so this is transparent to it.
     const outSuffix = attempt > 1 ? `#a${attempt}` : '';
     throwIfCancelled(runId);
+    // DIAG (2.0.5): time the model load separately — it runs before t0
+    // and is invisible in r.ms, so the SW split can tell load from run.
+    const loadT0 = performance.now();
     await ensureModel('inpaint');
+    const loadMs = Math.round(performance.now() - loadT0);
     throwIfCancelled(runId);
     const t0 = performance.now();
     const results = [];
@@ -614,7 +618,7 @@ const handlers = {
     } finally {
       releaseRun(runId);
     }
-    return { ok: true, results, ms: Math.round(performance.now() - t0), totalTiles };
+    return { ok: true, results, ms: Math.round(performance.now() - t0), totalTiles, loadMs };
   },
 };
 
