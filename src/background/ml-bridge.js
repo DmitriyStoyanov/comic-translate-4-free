@@ -1078,18 +1078,20 @@ export async function runGpuInpaint(opts) {
 // on GPU_SKIPPED (no navigator.gpu in the doc realm, worker creation /
 // ready failure), the SW logs "skipped" and falls back to the single
 // WASM path. Cancel never falls back: cancelChromeGpuInpaint rejects
-// as cancelled and sends ML_GPU_CANCEL, and the ML_CANCEL broadcast to
-// the doc terminates the job there too (belt and suspenders, idempotent).
+// as cancelled and sends ML_CANCEL, which stops the run's GPU loop
+// but KEEPS the shared worker alive for the next run (2.0.6 reuse);
+// the ML_CANCEL broadcast to the doc does the same thing (belt and
+// suspenders, idempotent).
 //
 // Alarm note: like pool and Firefox GPU calls, Chrome GPU calls bypass
 // callMl, so they create no ct-ml alarm entries. The watchdog covers
 // the SW-alive case. The SW-dead case is NOT covered by the callMl
 // alarm backup for GPU calls (no entry exists to fire); progress
 // messages keep the SW alive during progressing runs, and the doc
-// terminates the GPU worker after any reply, so a dead SW leaves a job
-// that ends on its own, not a leak — but the run itself is lost, same
-// as any SW-death without an alarm entry. Reported as a known limit,
-// not hidden.
+// keeps the shared GPU worker alive across runs (2.0.6), so a dead SW
+// leaves a worker that ends on its own (idle timeout) rather than a
+// leak — but the run itself is lost, same as any SW-death without an
+// alarm entry. Reported as a known limit, not hidden.
 //
 // The offscreen doc's runtime listener is document-guarded (see
 // offscreen.js): without that guard a Chrome Dedicated Worker exposing
@@ -1155,7 +1157,11 @@ export async function runChromeGpuInpaint(opts) {
   const job = {
     close(err) {
       clearWatchdog();
-      try { cancelGpuMessage({ type: MSG.ML_GPU_CANCEL, runId }); } catch {}
+      // 2.0.6: user cancel sends ML_CANCEL, not ML_GPU_CANCEL — the doc
+      // stops this run's GPU loop but keeps the shared worker (and its
+      // loaded session) alive for the next run. ML_GPU_CANCEL is the
+      // watchdog hang path only, and it terminates the worker.
+      try { cancelGpuMessage({ type: MSG.ML_CANCEL, runId }); } catch {}
       try { cancelReject?.(err || gpuCancelledError()); } catch {}
     },
   };

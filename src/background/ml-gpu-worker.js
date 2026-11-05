@@ -4,9 +4,11 @@
 // Separate realm from the shared worker on purpose: a WebGPU session
 // still runs inside a WASM instance and shares that realm's heap
 // (1.3.4 finding), so GPU LaMa must never share a realm with WASM
-// sessions. Terminating this worker is the reclaim path for GPU
-// buffers: on any GPU failure or hang, the background terminates it
-// and retries once on the shared WASM worker, never reusing it.
+// sessions. 2.0.6: the worker is KEPT ALIVE across runs (Chrome doc
+// owns one shared instance) so the LaMa session loads once; it dies
+// only on GPU failure/hang, worker error, or 10 idle minutes. On a
+// failure the doc terminates it and the SW retries once on the shared
+// WASM worker. User cancel stops the run's loop but keeps the worker.
 // Reuses the offscreen handlers verbatim: same module, same IDB pixel
 // bus and models, only the thread and the provider flag change.
 //

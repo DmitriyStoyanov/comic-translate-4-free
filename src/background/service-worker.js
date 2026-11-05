@@ -159,9 +159,10 @@ function abortRunResources(id, r) {
   // it too (reclaims GPU buffers; cancel never falls back to WASM).
   try { cancelGpuInpaint(id); } catch {}
   // GPU1-Chrome: the Chrome GPU worker is owned by the offscreen
-  // document, not by this worker — terminate it too (ML_GPU_CANCEL to
-  // the doc, plus the ML_CANCEL broadcast below, which the doc also
-  // terminates on; both are idempotent).
+  // document, not by this worker — cancel it too (ML_CANCEL to the
+  // doc stops the run's GPU loop but keeps the shared worker alive
+  // for the next run; the ML_CANCEL broadcast below does the same;
+  // both are idempotent).
   try { cancelChromeGpuInpaint(id); } catch {}
 }
 

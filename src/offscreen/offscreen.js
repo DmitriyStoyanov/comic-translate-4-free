@@ -169,23 +169,130 @@ function releaseRun(runId) {
   if (runId && !cancelledRuns.has(runId)) cancelledRuns.delete(runId);
 }
 
-// Chrome GPU1: GPU jobs owned by the offscreen document (document realm
-// only — the document spawns the GPU worker; the service worker cannot
-// spawn workers). Map runId -> {worker, pending, terminated}. The GPU
-// worker has its own cancelledRuns set, so the document's flag alone
-// cannot stop it: cancel paths terminate the job here (see ML_CANCEL
-// and ML_GPU_CANCEL below). Registry stays empty in worker realms —
-// workers never run ML_GPU_INPAINT (document guard in that handler),
-// so terminating here is a no-op there.
-const chromeGpuJobs = new Map();
-function terminateChromeGpuJob(runId, err) {
-  const job = chromeGpuJobs.get(runId);
-  if (!job) return;
-  chromeGpuJobs.delete(runId);
-  job.terminated = true;
-  try { job.pending?.reject(err || new Error('GPU worker terminated')); } catch {}
-  job.pending = null;
-  try { job.worker.terminate(); } catch {}
+// Chrome GPU1 (2.0.6): ONE shared dedicated GPU worker per offscreen
+// document, kept alive across runs so the LaMa WebGPU session (206MB
+// model + session creation, ~6.3s on the first run) loads once. Later
+// runs find inpainter.loaded true in the worker and pay ~0ms load.
+// Replies are routed by callId, so concurrent runs share the worker.
+// The worker dies only on GPU failure/hang (untrustworthy session),
+// on worker error, or after 10 idle minutes — never after a
+// successful reply, and never on user cancel (cancel stops the run's
+// loop but keeps the session). Results are IDB keys, so keeping the
+// worker loses nothing. Document realm only — the document spawns the
+// worker; the service worker cannot spawn workers. All of this stays
+// empty in worker realms (workers never run ML_GPU_INPAINT), so the
+// cancel/kill helpers below are no-ops there.
+let chromeGpuWorker = null;
+let chromeGpuWorkerReady = null; // promise resolved at ml-ready
+let chromeGpuSeq = 0;
+const chromeGpuPending = new Map(); // callId -> {resolve, reject, runId}
+let chromeGpuIdleTimer = null;
+const CHROME_GPU_IDLE_MS = 10 * 60 * 1000;
+
+function armChromeGpuIdleTimer() {
+  try { if (chromeGpuIdleTimer) clearTimeout(chromeGpuIdleTimer); } catch {}
+  chromeGpuIdleTimer = setTimeout(() => {
+    // Only when idle: a pending job re-arms on completion, so this
+    // never fires mid-run. The next run recreates the worker and pays
+    // the model load again.
+    if (chromeGpuPending.size === 0) terminateChromeGpuWorker(null);
+  }, CHROME_GPU_IDLE_MS);
+}
+
+function terminateChromeGpuWorker(err) {
+  const worker = chromeGpuWorker;
+  chromeGpuWorker = null;
+  chromeGpuWorkerReady = null;
+  try { if (chromeGpuIdleTimer) { clearTimeout(chromeGpuIdleTimer); chromeGpuIdleTimer = null; } } catch {}
+  if (worker) { try { worker.terminate(); } catch {} }
+  if (err) {
+    for (const [, p] of chromeGpuPending) { try { p.reject(err); } catch {} }
+    chromeGpuPending.clear();
+  }
+}
+
+// Cancel one run's GPU job without killing the shared worker: reject
+// its pending replies and tell the worker to stop its inpaint loop
+// (the worker's ML_CANCEL handler marks the run; the loop throws
+// between tiles). The loaded LaMa session stays for the next run.
+function cancelChromeGpuJob(runId, err) {
+  let hadPending = false;
+  for (const [callId, p] of chromeGpuPending) {
+    if (p.runId === runId) {
+      chromeGpuPending.delete(callId);
+      hadPending = true;
+      try { p.reject(err || Object.assign(new Error('cancelled'), { cancelled: true })); } catch {}
+    }
+  }
+  if (chromeGpuWorker) {
+    try { chromeGpuWorker.postMessage({ type: MSG.ML_CANCEL, runId }); } catch {}
+  }
+  return hadPending;
+}
+
+// Get the shared GPU worker, creating it (and awaiting ml-ready) on
+// the first run only. Concurrent callers during creation share the
+// one creation promise instead of spawning a second worker.
+async function getChromeGpuWorker() {
+  if (chromeGpuWorkerReady) {
+    await chromeGpuWorkerReady;
+    if (!chromeGpuWorker) throw new Error('GPU_SKIPPED: GPU worker failed to start');
+    return { worker: chromeGpuWorker, readyMs: 0 };
+  }
+  let worker;
+  try {
+    worker = new Worker(chrome.runtime.getURL('src/background/ml-gpu-worker.js'));
+  } catch (e) {
+    throw new Error('GPU_SKIPPED: GPU worker creation failed: ' + String((e && e.message) || e));
+  }
+  chromeGpuWorker = worker;
+  const readyT0 = performance.now();
+  chromeGpuWorkerReady = new Promise((resolve, reject) => {
+    const to = setTimeout(() => {
+      // Creation timed out: drop the worker so the next run retries.
+      if (chromeGpuWorker === worker) { chromeGpuWorker = null; chromeGpuWorkerReady = null; try { worker.terminate(); } catch {} }
+      reject(new Error('GPU_SKIPPED: GPU worker did not become ready after 15s'));
+    }, 15000);
+    worker.onmessage = (e) => {
+      const d = e && e.data;
+      if (!d) return;
+      if (d.type === 'ml-ready') {
+        clearTimeout(to);
+        worker.onmessage = (ev) => {
+          const m = ev && ev.data;
+          if (!m) return;
+          if (m.type === 'inpaint-progress') {
+            try { if (globalThis.__ctInpaintProgress) globalThis.__ctInpaintProgress(m.runId, m.frac); } catch {}
+            return;
+          }
+          if (m.callId == null) return;
+          const p = chromeGpuPending.get(m.callId);
+          if (!p) return;
+          chromeGpuPending.delete(m.callId);
+          if (m.ok) p.resolve(m.res);
+          else {
+            // An error reply means the GPU session may be broken —
+            // drop the worker so the next run starts fresh (and pays
+            // the load again). The SW downgrades this run to WASM.
+            const err = new Error(m.error || 'GPU worker failed');
+            terminateChromeGpuWorker(err);
+            try { p.reject(err); } catch {}
+          }
+        };
+        worker.onerror = (ev) => {
+          terminateChromeGpuWorker(new Error('GPU worker failed: ' + String((ev && ev.message) || ev || '')));
+        };
+        resolve();
+      }
+    };
+    worker.onerror = (ev) => {
+      clearTimeout(to);
+      if (chromeGpuWorker === worker) { chromeGpuWorker = null; chromeGpuWorkerReady = null; }
+      reject(new Error('GPU worker failed to start: ' + String((ev && ev.message) || ev || '')));
+    };
+  });
+  await chromeGpuWorkerReady;
+  return { worker: chromeGpuWorker, readyMs: Math.round(performance.now() - readyT0) };
 }
 
 // Fast-path inpaint for uniform backgrounds: if the unmasked pixels have low
@@ -285,113 +392,63 @@ const handlers = {
       // the next stage aborts) and would otherwise never be released. Sets
       // iterate in insertion order, so this drops the oldest entries first.
       while (cancelledRuns.size > 64) cancelledRuns.delete(cancelledRuns.values().next().value);
-      // Chrome GPU1: also terminate this run's GPU worker. The worker has
-      // its own cancelledRuns set, so the flag above cannot stop it, and
-      // a blocked GPU run would otherwise keep burning after cancel.
-      // No-op in worker realms (their registry is always empty).
-      terminateChromeGpuJob(runId, Object.assign(new Error('cancelled'), { cancelled: true }));
+      // Chrome GPU1 (2.0.6): cancel this run's GPU job WITHOUT killing
+      // the shared worker — its loaded LaMa session stays for the next
+      // run. No-op in worker realms (their registry is always empty).
+      cancelChromeGpuJob(runId, Object.assign(new Error('cancelled'), { cancelled: true }));
     }
     return { ok: true };
   },
 
-  // ML_GPU_CANCEL {runId} — Chrome GPU1: terminate this run's GPU worker
-  // (same termination as ML_CANCEL, but without touching cancelledRuns —
-  // used by the SW watchdog, which downgrades rather than cancels).
+  // ML_GPU_CANCEL {runId} — Chrome GPU1: the SW watchdog sends this on
+  // a hang (no progress or reply). A hung GPU session is untrustworthy,
+  // so the shared worker dies with all its pending jobs. The SW
+  // downgrades this run to WASM; the next run creates a fresh worker
+  // and pays the model load again. User cancel does NOT use this path
+  // (it sends ML_CANCEL, which keeps the worker alive).
   [MSG.ML_GPU_CANCEL]({ runId }) {
-    if (runId) terminateChromeGpuJob(runId, Object.assign(new Error('cancelled'), { cancelled: true }));
+    if (runId) terminateChromeGpuWorker(Object.assign(new Error('cancelled'), { cancelled: true }));
     return { ok: true };
   },
 
   // ML_GPU_INPAINT {patches, runId} — Chrome GPU1: offscreen-document
-  // only. The SW cannot spawn workers, so the document spawns the
+  // only. The SW cannot spawn workers, so the document owns the
   // dedicated GPU worker (ml-gpu-worker.js, __ctGpuInpaintWorker flag set
   // there, WEBGPU_KINDS ['inpaint'] in that realm only), forwards this
   // run's ML_INPAINT to it, forwards its progress through
   // __ctInpaintProgress (offscreen-progress.js throttles to 500ms, plus
-  // the final 1.0), and terminates the worker after the reply. The
-  // document realm itself never runs a GPU session: its own WEBGPU_KINDS
-  // stays empty, so its WASM sessions are untouched. Results are pixel
-  // keys in IDB, not worker memory, so terminating after a reply loses
-  // nothing. Errors are prefixed GPU_SKIPPED when the failure is absence
-  // (no navigator.gpu, worker creation/ready failure) rather than a GPU
-  // run failure — the SW logs those as "skipped", not "failed", and falls
-  // back to the single WASM path either way. Any other error is a GPU
-  // run failure and the SW downgrades (once) to WASM.
+  // the final 1.0). 2.0.6: the worker is SHARED across runs, not
+  // spawned per run — the LaMa WebGPU session loads once and later runs
+  // pay ~0ms load (readyMs 0, loadMs ~0 in the split line). The worker
+  // dies only on GPU failure/hang, worker error, or 10 idle minutes.
+  // The document realm itself never runs a GPU session: its own
+  // WEBGPU_KINDS stays empty, so its WASM sessions are untouched.
+  // Results are pixel keys in IDB, not worker memory, so keeping the
+  // worker loses nothing. Errors are prefixed GPU_SKIPPED when the
+  // failure is absence (no navigator.gpu, worker creation/ready
+  // failure) rather than a GPU run failure — the SW logs those as
+  // "skipped", not "failed", and falls back to the single WASM path
+  // either way. Any other error is a GPU run failure and the SW
+  // downgrades (once) to WASM.
   async [MSG.ML_GPU_INPAINT]({ patches, runId }) {
     if (typeof document === 'undefined') throw new Error('GPU_SKIPPED: ml/gpu-inpaint is offscreen-document-only');
     if (typeof navigator === 'undefined' || !navigator.gpu) throw new Error('GPU_SKIPPED: no navigator.gpu in the offscreen document realm, using WASM path');
     if (!patches || !patches.length) return { ok: true, results: [], ms: 0, totalTiles: 0 };
     throwIfCancelled(runId);
-    // A stale job for this run (one inpaint per run, so this should not
-    // happen) dies first rather than running alongside the new one.
-    terminateChromeGpuJob(runId, new Error('replaced by a new GPU job'));
-    let worker;
-    try {
-      worker = new Worker(chrome.runtime.getURL('src/background/ml-gpu-worker.js'));
-    } catch (e) {
-      throw new Error('GPU_SKIPPED: GPU worker creation failed: ' + String((e && e.message) || e));
-    }
-    const job = { worker, pending: null, terminated: false };
-    chromeGpuJobs.set(runId, job);
-    // 1.4.0 (m9): ready latency is measured so the panel log can tell
-    // slow-start GPU from missing GPU. The ready window is 15 s (was
-    // 5 s): a slow/cold start used to be marked "skipped", so GPU was
-    // never used and every run paid 5 s + WASM time.
-    let readyMs = 0;
-    const readyT0 = performance.now();
-    try {
-      await new Promise((resolve, reject) => {
-        const to = setTimeout(() => {
-          reject(new Error('GPU_SKIPPED: GPU worker did not become ready after 15s'));
-        }, 15000);
-        worker.onmessage = (e) => {
-          const d = e && e.data;
-          if (!d) return;
-          if (d.type === 'ml-ready') {
-            clearTimeout(to);
-            readyMs = Math.round(performance.now() - readyT0);
-            worker.onmessage = (ev) => {
-              const m = ev && ev.data;
-              if (!m) return;
-              if (m.type === 'inpaint-progress') {
-                try { if (globalThis.__ctInpaintProgress) globalThis.__ctInpaintProgress(runId, m.frac); } catch {}
-                return;
-              }
-              if (m.callId == null || !job.pending) return;
-              const p = job.pending; job.pending = null;
-              if (m.ok) p.resolve(m.res);
-              else p.reject(new Error(m.error || 'GPU worker failed'));
-            };
-            worker.onerror = (ev) => {
-              try { job.pending?.reject(new Error('GPU worker failed: ' + String((ev && ev.message) || ev || ''))); } catch {}
-              job.pending = null;
-            };
-            resolve();
-          }
-        };
-        worker.onerror = (ev) => {
-          clearTimeout(to);
-          reject(new Error('GPU worker failed to start: ' + String((ev && ev.message) || ev || '')));
-        };
-      });
-      throwIfCancelled(runId);
-      const res = await new Promise((resolve, reject) => {
-        job.pending = { resolve, reject };
-        try {
-          worker.postMessage({ type: MSG.ML_INPAINT, runId, callId: 1, patches });
-        } catch (e) {
-          job.pending = null;
-          reject(e);
-        }
-      });
-      return { ok: true, results: (res && res.results) || [], ms: (res && res.ms) || 0, totalTiles: (res && res.totalTiles) || 0, readyMs, loadMs: (res && res.loadMs) || 0 };
-    } finally {
-      // If cancel already deleted the job, this is a no-op (the worker is
-      // already terminated). Otherwise terminate now: results are IDB
-      // keys, so terminating after a reply loses nothing, and it is the
-      // GPU-buffer reclaim on every path (success, error, hang-by-SW).
-      if (chromeGpuJobs.get(runId) === job) terminateChromeGpuJob(runId, null);
-    }
+    const { worker, readyMs } = await getChromeGpuWorker();
+    throwIfCancelled(runId);
+    const callId = ++chromeGpuSeq;
+    const res = await new Promise((resolve, reject) => {
+      chromeGpuPending.set(callId, { resolve, reject, runId });
+      try {
+        worker.postMessage({ type: MSG.ML_INPAINT, runId, callId, patches });
+      } catch (e) {
+        chromeGpuPending.delete(callId);
+        reject(e);
+      }
+    });
+    armChromeGpuIdleTimer();
+    return { ok: true, results: (res && res.results) || [], ms: (res && res.ms) || 0, totalTiles: (res && res.totalTiles) || 0, readyMs, loadMs: (res && res.loadMs) || 0 };
   },
 
   async [MSG.ML_DETECT]({ key, width, height, threshold, runId, noStrip }) {
