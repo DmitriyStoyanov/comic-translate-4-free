@@ -114,28 +114,43 @@ function benchLog(line) {
   } catch {}
 }
 
+// 2.0.21: the benchmark is idle-time work. A new run interrupts it:
+// benchCancel() stops the in-flight count and the loop, saves nothing,
+// and the extension keeps the raw core count until a later bench
+// finishes and overwrites it. The SW re-triggers the bench after the
+// next successful run, so an interrupted bench simply retries later.
+let benchCancelled = false;
+let benchCancelResolve = null;
+function benchCancel() {
+  if (!benchRunning) return;
+  benchCancelled = true;
+  if (benchCancelResolve) { const r = benchCancelResolve; benchCancelResolve = null; try { r(); } catch {} }
+}
+
 // Time one thread count in a fresh worker (a fresh realm, because the
 // pool size is fixed at first session creation). Resolves the full
 // chain result {visionMs, prefillMs, stepMs, totalMs} or null on any
-// failure or timeout — a failed count is skipped, never fatal. Timeout
+// failure, timeout or cancel — a failed count is skipped, never fatal. Timeout
 // 120s (a bound, not a target): the worker loads three models
 // (~122MB) and creates three sessions, so it needs more room than the
 // old step-only worker's 60s.
 function benchOneCount(threads) {
   return new Promise((resolve) => {
     let worker;
+    let timer;
+    let settled = false;
+    const done = (v) => { if (settled) return; settled = true; benchCancelResolve = null; clearTimeout(timer); try { worker.terminate(); } catch {} resolve(v); };
     try { worker = new Worker(chrome.runtime.getURL('src/background/ml-bench-worker.js')); } catch { resolve(null); return; }
-    const timer = setTimeout(() => { try { worker.terminate(); } catch {} resolve(null); }, 120000);
+    timer = setTimeout(() => done(null), 120000);
+    benchCancelResolve = () => done(null);
     worker.onmessage = (e) => {
       const d = e && e.data;
       if (!d || d.type !== 'bench-result' || d.threads !== threads) return;
-      clearTimeout(timer);
-      try { worker.terminate(); } catch {}
-      resolve(d.ok && typeof d.totalMs === 'number' ? { visionMs: d.visionMs, prefillMs: d.prefillMs, stepMs: d.stepMs, totalMs: d.totalMs } : null);
+      done(d.ok && typeof d.totalMs === 'number' ? { visionMs: d.visionMs, prefillMs: d.prefillMs, stepMs: d.stepMs, totalMs: d.totalMs } : null);
     };
-    worker.onerror = () => { clearTimeout(timer); try { worker.terminate(); } catch {} resolve(null); };
+    worker.onerror = () => done(null);
     try { worker.postMessage({ type: 'bench', threads, steps: 20, warmup: 2 }); }
-    catch { clearTimeout(timer); try { worker.terminate(); } catch {} resolve(null); }
+    catch { done(null); }
   });
 }
 
@@ -159,6 +174,7 @@ async function runThreadBenchmark() {
   if (typeof document === 'undefined') return; // offscreen-document realm only
   if (typeof SharedArrayBuffer === 'undefined') { benchLog('threads bench skipped: no SharedArrayBuffer'); return; }
   benchRunning = true;
+  benchCancelled = false;
   try {
     const cores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
     try {
@@ -182,7 +198,9 @@ async function runThreadBenchmark() {
     benchLog('threads bench started, testing ' + counts.join(', ') + ' threads');
     const results = [];
     for (const n of counts) {
+      if (benchCancelled) break;
       const r = await benchOneCount(n);
+      if (benchCancelled) break;
       if (r != null) {
         results.push({ threads: n, ...r });
         benchLog('threads bench ' + n + ' threads: vision ' + Math.round(r.visionMs) + 'ms prefill ' + Math.round(r.prefillMs) + 'ms step ' + Math.round(r.stepMs * 10) / 10 + 'ms/step total ' + Math.round(r.totalMs) + 'ms/crop');
@@ -190,6 +208,7 @@ async function runThreadBenchmark() {
         benchLog('threads bench ' + n + ' threads: failed');
       }
     }
+    if (benchCancelled) { benchLog('threads bench cancelled: interrupted by a new run, keeping ' + cores + ' threads'); return; }
     if (!results.length) { benchLog('threads bench: no count succeeded, keeping ' + cores + ' threads'); return; }
     const minTotal = Math.min(...results.map((r) => r.totalMs));
     const best = results.filter((r) => r.totalMs <= minTotal * 1.05).sort((a, b) => a.threads - b.threads)[0];
@@ -201,6 +220,7 @@ async function runThreadBenchmark() {
     benchLog('threads bench best ' + best.threads + ' threads (was ' + cores + '), total ' + Math.round(best.totalMs) + 'ms/crop — used from the next run');
   } finally {
     benchRunning = false;
+    benchCancelled = false;
   }
 }
 
@@ -948,6 +968,10 @@ if (typeof document !== 'undefined' && typeof chrome !== 'undefined' && chrome.r
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   const fn = handlers[msg && msg.type];
   if (!fn) return false; // not ours
+  // 2.0.21: a new run interrupts the idle-time benchmark — the bench
+  // yields the CPU to real work and retries after the next run. Any
+  // message here except the bench trigger itself means real work.
+  if (msg.type !== MSG.ML_BENCH_THREADS) benchCancel();
   (async () => {
     try {
       sendResponse(await fn(msg));
