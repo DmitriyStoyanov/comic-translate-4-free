@@ -1640,10 +1640,11 @@ chrome.tabs.onRemoved.addListener(tabId => autoFired.delete(tabId));
 // storage.local as detectedCores { cores, detectedAt, source }.
 // Saved only when missing or when the live number differs (machine
 // changed). Never throws, never blocks install or a run, never shows
-// UI. Thread calculation itself stays live in offscreen.js (min(10,
-// hardwareConcurrency) on Chrome, 1 on Firefox without SAB); this
-// record is the first-startup detection, and the debug-panel diag
-// line below is how it is verified (debug on, first run).
+// UI. Thread calculation itself stays live in offscreen.js (all
+// detected cores on Chrome, 1 on Firefox without SAB — cap removed
+// in 2.0.3); this record is the first-startup detection, and the
+// debug-panel diag line below is how it is verified (debug on,
+// first run).
 async function saveDetectedCores(cores, source) {
   try {
     if (!cores || typeof cores !== 'number' || cores < 1) return;
