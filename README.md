@@ -1,6 +1,6 @@
 # comic-translate-4-free
 
-**Language:** [English](README.md) · [हिन्दी](README.hi.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [Español](README.es.md) · [العربية](README.ar.md) · [Français](README.fr.md) · [বাংলা](README.bn.md) · [Português](README.pt.md) · [Русский](README.ru.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [اردو](README.ur.md) · [Deutsch](README.de.md)
+Language: [English](README.md) · [हिन्दी](README.hi.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [Español](README.es.md) · [العربية](README.ar.md) · [Français](README.fr.md) · [বাংলা](README.bn.md) · [Português](README.pt.md) · [Русский](README.ru.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [اردو](README.ur.md) · [Deutsch](README.de.md)
 
 Read manga in your language — right in the browser.
 
@@ -43,32 +43,32 @@ comic-translate-4-free translates manga and comic pages automatically as you bro
 
 ## ✨ Features
 
-- **Automatic translation** — open a manga page on an allowed site and the translated version appears in place, no button click needed.
-- **Right-click any image** — choose "Send to comic-translate-4-free" to translate a specific picture, even one smaller than the minimum size.
-- **114 target languages** via Google Translate, Azure Translator, or your own local LM Studio server.
-- **Source language auto-detect** — Japanese, English, Simplified/Traditional Chinese identified automatically from the OCR'd text.
-- **Long-strip / webtoon support** — tall pages are processed in overlapping segments so text stays sharp.
-- **17 UI languages** — the extension interface follows your browser's language setting.
+- Automatic translation — open a manga page on an allowed site and the translated version appears in place, no button click needed.
+- Right-click any image — choose "Send to comic-translate-4-free" to translate a specific picture, even one smaller than the minimum size.
+- 114 target languages via Google Translate, Azure Translator, or your own local LM Studio server.
+- Source language auto-detect — Japanese, English, Simplified/Traditional Chinese identified automatically from the OCR'd text.
+- Long-strip / webtoon support — tall pages are processed in overlapping segments so text stays sharp.
+- 17 UI languages — the extension interface follows your browser's language setting.
 
 ### 🔒 Privacy
 
-- **The AI runs on your machine.** Bubble detection, OCR, and inpainting all run locally in your browser. Detection and OCR run via WebAssembly. Inpainting runs on GPU on Chrome (with WebAssembly fallback), and via WebAssembly on Firefox. Your pages never leave your device.
-- **Only translated text is sent out** — just the extracted strings go to the translation service you choose (Google / Azure / your local LM Studio).
-- **No account, no tracking, no telemetry.** All settings and cached models stay in your browser's local storage.
+- The AI runs on your machine. Bubble detection, OCR, and inpainting all run locally in your browser. Detection and OCR run via WebAssembly. Inpainting runs on GPU on Chrome (with WebAssembly fallback), and via WebAssembly on Firefox. Your pages never leave your device.
+- Only translated text is sent out — just the extracted strings go to the translation service you choose (Google / Azure / your local LM Studio).
+- No account, no tracking, no telemetry. All settings and cached models stay in your browser's local storage.
 
 ---
 
 ## 🚀 Installation
 
-**Chrome / Edge / Brave:**
+Chrome / Edge / Brave:
 
-[**Install from the Chrome Web Store**](https://chromewebstore.google.com/detail/pndooikgcenncdohfggodonniihplppj) — one click, automatic updates.
+[Install from the Chrome Web Store](https://chromewebstore.google.com/detail/pndooikgcenncdohfggodonniihplppj) — one click, automatic updates.
 
-**Firefox:**
+Firefox:
 
-[**Install from Firefox Add-ons**](https://addons.mozilla.org/en-US/firefox/addon/comic-translate-4-free/) — one click, automatic updates.
+[Install from Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/comic-translate-4-free/) — one click, automatic updates.
 
-After installing, open the Settings page and click **Download all models** once (~350 MB: detector, OCR, inpainter). They're cached in the browser and verified by byte size.
+After installing, open the Settings page and click Download all models once (~350 MB: detector, OCR, inpainter). They're cached in the browser and verified by byte size.
 
 ![Downloading the models from the Settings page](docs/images/options-models.png)
 
@@ -76,21 +76,21 @@ After installing, open the Settings page and click **Download all models** once 
 
 ## 💡 How to Use
 
-1. **Allow the site first** — click the extension icon and press **Allow this site** (or enable **ALLOW ALL SITES**). Translation only runs where you've granted permission.
+1. Allow the site first — click the extension icon and press Allow this site (or enable ALLOW ALL SITES). Translation only runs where you've granted permission.
 
    ![Allow the site from the popup](docs/images/popup.png)
 
-2. **Reload the manga page** — it starts translating automatically when the page loads. A pill in the top-right shows live progress (Capturing → Detecting → OCR → …).
-3. **Done** — the page's picture is replaced in place with the translated version.
+2. Reload the manga page — it starts translating automatically when the page loads. A pill in the top-right shows live progress (Capturing → Detecting → OCR → …).
+3. Done — the page's picture is replaced in place with the translated version.
 
-**Tips:**
-- Right-click any image → **Send to comic-translate-4-free** to translate just that picture.
+Tips:
+- Right-click any image → Send to comic-translate-4-free to translate just that picture.
 
   ![Right-click to send an image](docs/images/right-click.png)
 
 - If a site blocks downloads (HTTP 403), the extension automatically retries via a background tab.
 - Pick your translation engine in Settings: Google (free, no key), Azure Translator (apply for keys below — 2M characters/month free), or LM Studio (local server).
-- Enable **Debug mode** in Settings to inspect every pipeline stage.
+- Enable Debug mode in Settings to inspect every pipeline stage.
 
 ---
 
@@ -102,7 +102,7 @@ To use Azure Translator as the translation engine:
 2. Create an Azure subscription
 3. Create an Azure Translator resource
 4. Select F0 (Free) pricing tier — 2 million characters/month, does not expire
-5. Resource Management → Keys and Endpoint → copy **KEY 1** and **Location/Region**
+5. Resource Management → Keys and Endpoint → copy KEY 1 and Location/Region
 6. Paste them into the extension's Settings page
 
 ---
@@ -117,11 +117,11 @@ If this extension is useful to you, consider supporting its development:
 
 ## ⚠️ Known Issues
 
-- **No Korean OCR yet** — source languages are Japanese, English, and Simplified/Traditional Chinese. (Korean remains available as a translation target.)
-- **One picture per page** for auto-translate (the page's main image). Use right-click → Send to translate others.
-- **Large sessions** — translating dozens of images in one session can crash the browser. Clear the page cache in Settings if this happens.
-- **Firefox** — models run in the background page (no offscreen documents), sharing memory with everything else. Restart the browser if you see "no available backend found".
-- **Firefox is slower than Chrome** — Firefox extensions cannot use shared memory for multi-threading (SharedArrayBuffer), so the model runs on one CPU thread. This is a Firefox platform limit, not an extension bug ([Mozilla bug 1673477](https://bugzilla.mozilla.org/show_bug.cgi?id=1673477)).
+- No Korean OCR yet — source languages are Japanese, English, and Simplified/Traditional Chinese. (Korean remains available as a translation target.)
+- One picture per page for auto-translate (the page's main image). Use right-click → Send to translate others.
+- Large sessions — translating dozens of images in one session can crash the browser. Clear the page cache in Settings if this happens.
+- Firefox — models run in the background page (no offscreen documents), sharing memory with everything else. Restart the browser if you see "no available backend found".
+- Firefox is slower than Chrome — Firefox extensions cannot use shared memory for multi-threading (SharedArrayBuffer), so the model runs on one CPU thread. This is a Firefox platform limit, not an extension bug ([Mozilla bug 1673477](https://bugzilla.mozilla.org/show_bug.cgi?id=1673477)).
 - Google Translate uses the unofficial free endpoint and may be rate-limited.
 
 ---
