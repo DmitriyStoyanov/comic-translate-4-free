@@ -35,31 +35,62 @@ ort.env.wasm.numThreads = Math.max(1, (typeof navigator !== 'undefined' && navig
 
 // Chrome 2.0.13: measured thread count (ML_BENCH_THREADS). The benchmark
 // runs once, in the background, after a successful run, and saves the
-// fastest count for this machine to storage.local (measuredThreads).
-// Later runs use it instead of the raw core count. numThreads only takes
-// effect before a session is created, so threadsReady() re-reads storage
-// on every call (inside ensureModel, at the start of a run before any
-// session is used): when a stored count differs from the one already
-// applied, it sets numThreads and drops the cached WASM sessions, so the
-// next ensureModel recreates them with the new pool. That is what makes
-// the measured count real on the next run — the old code read storage
-// once at doc load and cached it, so a bench result saved after load
-// never applied until a reload. Never throws: any failure keeps the
-// current count. The GPU worker is a separate realm and is not affected.
+// fastest count for this machine (measuredThreads). Later runs use it
+// instead of the raw core count. numThreads only takes effect before a
+// session is created, so threadsReady() re-reads storage on every call
+// (inside ensureModel, at the start of a run before any session is
+// used): when a stored count differs from the one already applied, it
+// sets numThreads and drops the cached WASM sessions, so the next
+// ensureModel recreates them with the new pool. That is what makes the
+// measured count real on the next run — the old code read storage once
+// at doc load and cached it, so a bench result saved after load never
+// applied until a reload. Never throws: any failure keeps the current
+// count. The GPU worker is a separate realm and is not affected.
 // The big/small-core split is why this measurement matters at all: the
 // browser only reports the total core count, so the best count (usually
 // near the big-core count) has to be measured, not assumed.
 // (2.0.16: re-read + reset; was read-once at load.)
+// (2.0.18: the measurement is permanent — saved to storage.local AND
+// storage.sync, read from local with sync as fallback. A cache clear
+// that wipes local storage must not lose it or re-trigger the bench:
+// sync lives in a separate store a local clear does not touch. Chrome
+// close and reboot already keep both stores. It runs once, the first
+// time the models exist (after the first successful run — at install
+// the models are not downloaded yet, so there is nothing to measure),
+// and then never again.)
+async function readMeasuredThreads() {
+  try {
+    const local = (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) ? chrome.storage.local : null;
+    if (local) {
+      const saved = await local.get('measuredThreads');
+      if (saved && saved.measuredThreads) return saved.measuredThreads;
+    }
+  } catch {}
+  try {
+    const sync = (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.sync) ? chrome.storage.sync : null;
+    if (sync) {
+      const saved = await sync.get('measuredThreads');
+      if (saved && saved.measuredThreads) {
+        // Restore the local copy so later reads are fast and the result
+        // survives even if sync is unavailable later.
+        try { await chrome.storage.local.set({ measuredThreads: saved.measuredThreads }); } catch {}
+        return saved.measuredThreads;
+      }
+    }
+  } catch {}
+  return null;
+}
+async function saveMeasuredThreads(value) {
+  try { await chrome.storage.local.set({ measuredThreads: value }); } catch {}
+  try { await chrome.storage.sync.set({ measuredThreads: value }); } catch {}
+}
 let threadsApplied = Math.max(1, (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4);
 let threadsApplying = null;
 async function threadsReady() {
   if (threadsApplying) { try { await threadsApplying; } catch {} return; }
   threadsApplying = (async () => {
     try {
-      const store = (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) ? chrome.storage.local : null;
-      if (!store) return;
-      const saved = await store.get('measuredThreads');
-      const m = saved && saved.measuredThreads;
+      const m = await readMeasuredThreads();
       if (m && Number.isInteger(m.threads) && m.threads >= 1 && m.threads !== threadsApplied) {
         threadsApplied = m.threads;
         ort.env.wasm.numThreads = m.threads;
@@ -123,9 +154,7 @@ async function runThreadBenchmark() {
   try {
     const cores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
     try {
-      const store = (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) ? chrome.storage.local : null;
-      const saved = store ? await store.get('measuredThreads') : null;
-      const m = saved && saved.measuredThreads;
+      const m = await readMeasuredThreads();
       if (m && m.hardwareConcurrency === cores && Number.isInteger(m.threads)) {
         benchLog('threads bench skipped: already measured ' + m.threads + ' threads');
         return;
@@ -156,7 +185,7 @@ async function runThreadBenchmark() {
     const timings = {};
     for (const r of results) timings[r.threads] = Math.round(r.medianMs * 10) / 10;
     try {
-      await chrome.storage.local.set({ measuredThreads: { threads: best.threads, timings, hardwareConcurrency: cores, measuredAt: new Date().toISOString() } });
+      await saveMeasuredThreads({ threads: best.threads, timings, hardwareConcurrency: cores, measuredAt: new Date().toISOString() });
     } catch {}
     benchLog('threads bench best ' + best.threads + ' threads (was ' + cores + '), median ' + Math.round(best.medianMs * 10) / 10 + 'ms/step — used from the next run');
   } finally {
