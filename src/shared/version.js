@@ -8,4 +8,4 @@
 // for Firefox; the Firefox zip's BUILD is set by build.sh.
 // Shown in the popup/options footers, baked into the page-cache key (so a
 // code change can never serve a stale cached page).
-export const BUILD = '2.0.14';
+export const BUILD = '2.0.15';

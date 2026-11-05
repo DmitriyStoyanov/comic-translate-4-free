@@ -117,7 +117,14 @@ async function runThreadBenchmark() {
         return;
       }
     } catch {}
-    const counts = [...new Set([1, 2, 4, cores])].filter((n) => n >= 1 && n <= cores).sort((a, b) => a - b);
+    // Doubling spread up to the machine's core count: each step doubles
+    // the parallelism, so the curve is sampled at doubling points on any
+    // machine — 10 cores -> 1,2,4,8,10; 18 cores -> 1,2,4,8,16,18.
+    // Testing every count would take one worker per count; the curve is
+    // smooth, so doubling points are enough to find the sweet spot.
+    const counts = [];
+    for (let n = 1; n < cores; n *= 2) counts.push(n);
+    counts.push(cores);
     const results = [];
     for (const n of counts) {
       const ms = await benchOneCount(n);
