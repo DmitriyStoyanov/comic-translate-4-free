@@ -34,6 +34,8 @@ export const MSG = {
   ML_GPU_INPAINT: 'ml/gpu-inpaint',      // Chrome GPU1: SW -> offscreen doc {patches, runId} -> {ok, results, ms, totalTiles} (doc owns one shared dedicated GPU worker across runs; doc realm itself never runs GPU sessions)
   ML_GPU_WARMUP: 'ml/gpu-warmup',        // Chrome GPU1: SW -> offscreen doc {runId} -> {ok} (pipeline start: create the shared GPU worker and load LaMa now, so the load overlaps detect/OCR/translate)
   ML_GPU_CANCEL: 'ml/gpu-cancel',        // Chrome GPU1: SW -> offscreen doc {runId} -> {ok} (watchdog hang only: terminate the shared GPU worker; idempotent)
+  ML_BENCH_THREADS: 'ml/bench-threads',  // Chrome 2.0.13: SW -> offscreen doc {} -> {ok} (after a successful run: measure the best WASM thread count once, in the background; fire-and-forget)
+  ML_BENCH_RESULT: 'ml/bench-result',    // Chrome 2.0.13: offscreen doc -> SW one-way {line} (benchmark progress/result lines for the panel log; no reply)
   // SW -> content (tabs.sendMessage)
   RUN_STARTED: 'ct/run-started',         // {runId} (marks the tab's current run; stale renders are ignored)
   RENDER: 'ct/render',                   // {runId, mode, imageDataUrl, width, height, blocks, timings, debug, srcUrl?}

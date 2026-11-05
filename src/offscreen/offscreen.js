@@ -32,6 +32,115 @@ try {
 // (thread-info numThreads 1) regardless of core count.
 ort.env.wasm.numThreads = Math.max(1, (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4);
 
+// Chrome 2.0.13: measured thread count (ML_BENCH_THREADS). The benchmark
+// runs once, in the background, after a successful run, and saves the
+// fastest count for this machine to storage.local (measuredThreads).
+// Later runs use it instead of the raw core count. Read once, before the
+// first session is created — numThreads only takes effect before session
+// creation, so ensureModel awaits this. Never throws: any failure keeps
+// the default above. The read starts at load, so it is usually done
+// before the first ensureModel.
+let threadsReadyPromise = null;
+function threadsReady() {
+  if (!threadsReadyPromise) {
+    threadsReadyPromise = (async () => {
+      try {
+        const store = (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) ? chrome.storage.local : null;
+        if (!store) return;
+        const saved = await store.get('measuredThreads');
+        const m = saved && saved.measuredThreads;
+        if (m && Number.isInteger(m.threads) && m.threads >= 1) {
+          ort.env.wasm.numThreads = m.threads;
+        }
+      } catch {}
+    })();
+  }
+  return threadsReadyPromise;
+}
+threadsReady();
+
+// Chrome 2.0.13: one benchmark line to the panel log (via the SW, which
+// owns diagPush) plus the offscreen doc console. Fire-and-forget.
+function benchLog(line) {
+  try { console.log('[ct-threads] ' + line); } catch {}
+  try {
+    const p = chrome.runtime.sendMessage({ type: MSG.ML_BENCH_RESULT, line });
+    if (p && p.catch) p.catch(() => {});
+  } catch {}
+}
+
+// Time one thread count in a fresh worker (a fresh realm, because the
+// pool size is fixed at first session creation). Null on any failure or
+// timeout — a failed count is skipped, never fatal.
+function benchOneCount(threads) {
+  return new Promise((resolve) => {
+    let worker;
+    try { worker = new Worker(chrome.runtime.getURL('src/background/ml-bench-worker.js')); } catch { resolve(null); return; }
+    const timer = setTimeout(() => { try { worker.terminate(); } catch {} resolve(null); }, 60000);
+    worker.onmessage = (e) => {
+      const d = e && e.data;
+      if (!d || d.type !== 'bench-result' || d.threads !== threads) return;
+      clearTimeout(timer);
+      try { worker.terminate(); } catch {}
+      resolve(d.ok && typeof d.medianMs === 'number' ? d.medianMs : null);
+    };
+    worker.onerror = () => { clearTimeout(timer); try { worker.terminate(); } catch {} resolve(null); };
+    try { worker.postMessage({ type: 'bench', threads, steps: 20, warmup: 2 }); }
+    catch { clearTimeout(timer); try { worker.terminate(); } catch {} resolve(null); }
+  });
+}
+
+// Chrome 2.0.13: measure the best WASM thread count once, in the
+// background. Counts tried: 1, 2, 4, and the full core count (deduped).
+// Each count times 20 Baberu decoder steps in its own worker (median).
+// The winner is the smallest count within 5% of the fastest — same speed
+// for less CPU. Saved to storage.local (measuredThreads, with the core
+// count it was measured on); the next run uses it via threadsReady.
+// Skips on Firefox (no SharedArrayBuffer: every count would be 1 thread),
+// while a benchmark is already running, and when a result for this core
+// count already exists.
+let benchRunning = false;
+async function runThreadBenchmark() {
+  if (benchRunning) return;
+  if (typeof document === 'undefined') return; // offscreen-document realm only
+  if (typeof SharedArrayBuffer === 'undefined') { benchLog('threads bench skipped: no SharedArrayBuffer'); return; }
+  benchRunning = true;
+  try {
+    const cores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
+    try {
+      const store = (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) ? chrome.storage.local : null;
+      const saved = store ? await store.get('measuredThreads') : null;
+      const m = saved && saved.measuredThreads;
+      if (m && m.hardwareConcurrency === cores && Number.isInteger(m.threads)) {
+        benchLog('threads bench skipped: already measured ' + m.threads + ' threads');
+        return;
+      }
+    } catch {}
+    const counts = [...new Set([1, 2, 4, cores])].filter((n) => n >= 1 && n <= cores).sort((a, b) => a - b);
+    const results = [];
+    for (const n of counts) {
+      const ms = await benchOneCount(n);
+      if (ms != null) {
+        results.push({ threads: n, medianMs: ms });
+        benchLog('threads bench ' + n + ' threads: median ' + Math.round(ms * 10) / 10 + 'ms/step');
+      } else {
+        benchLog('threads bench ' + n + ' threads: failed');
+      }
+    }
+    if (!results.length) { benchLog('threads bench: no count succeeded, keeping ' + cores + ' threads'); return; }
+    const minMs = Math.min(...results.map((r) => r.medianMs));
+    const best = results.filter((r) => r.medianMs <= minMs * 1.05).sort((a, b) => a.threads - b.threads)[0];
+    const timings = {};
+    for (const r of results) timings[r.threads] = Math.round(r.medianMs * 10) / 10;
+    try {
+      await chrome.storage.local.set({ measuredThreads: { threads: best.threads, timings, hardwareConcurrency: cores, measuredAt: new Date().toISOString() } });
+    } catch {}
+    benchLog('threads bench best ' + best.threads + ' threads (was ' + cores + '), median ' + Math.round(best.medianMs * 10) / 10 + 'ms/step — used from the next run');
+  } finally {
+    benchRunning = false;
+  }
+}
+
 const detector = new Detector();
 const baberu = new BaberuOCR();
 const inpainter = new Inpainter();
@@ -137,6 +246,8 @@ async function ensureModel(kind) {
   // Await any in-flight load so inference never runs on a null session.
   if (loading[kind]) { await loading[kind]; return; }
   const p = (async () => {
+    // 2.0.13: apply a measured thread count before creating any session.
+    await threadsReady();
     if (kind === 'detector' && !detector.loaded) {
       await detector.load(await modelBuffer('detector'), ['wasm']);
     } else if (kind === 'ocr-baberu' && !baberu.loaded) {
@@ -423,6 +534,15 @@ const handlers = {
       const { worker } = await getChromeGpuWorker();
       try { worker.postMessage({ type: MSG.ML_ENSURE, model: 'inpaint', runId, callId: ++chromeGpuSeq }); } catch {}
     } catch {}
+    return { ok: true };
+  },
+
+  // ML_BENCH_THREADS — Chrome 2.0.13: the SW sends this once after a
+  // successful run. Fire-and-forget: returns at once; the benchmark runs
+  // on its own (runThreadBenchmark) and saves the winner. A failure
+  // changes nothing: the next run keeps the raw core count.
+  [MSG.ML_BENCH_THREADS]() {
+    try { runThreadBenchmark().catch(() => {}); } catch {}
     return { ok: true };
   },
 

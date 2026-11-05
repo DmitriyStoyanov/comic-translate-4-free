@@ -1651,6 +1651,15 @@ async function runPipeline(tabId, opts = {}) {
     for (const k of pxKeys) await pixelDrop(k);
     keepAliveStop(runId); // FIX2: release the run-scoped hold last, after all cleanup.
   }
+  // Chrome 2.0.13: after a successful run, measure the best WASM thread
+  // count once, in the background (ML_BENCH_THREADS). Fire-and-forget —
+  // the run never waits for it, and a failure changes nothing.
+  if (result && result.ok) {
+    try {
+      const p = chrome.runtime.sendMessage({ type: MSG.ML_BENCH_THREADS });
+      if (p && p.catch) p.catch(() => {});
+    } catch {}
+  }
   return result;
 }
 
@@ -1934,6 +1943,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // GPU1-Chrome: the same progress re-arms the SW-side GPU watchdog
     // in ml-bridge.js (progress resets the 60s inactivity window).
     try { notifyChromeGpuProgress(msg.runId, msg.frac); } catch {}
+    return false;
+  }
+  if (msg && msg.type === MSG.ML_BENCH_RESULT) {
+    try { if (typeof msg.line === 'string' && msg.line) diagPush(msg.line); } catch { /* bench lines must never break the pipeline */ }
     return false;
   }
   // Pill "Allow <host>" button (content script). permissions.request() must be
