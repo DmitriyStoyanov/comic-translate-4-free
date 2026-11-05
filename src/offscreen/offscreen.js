@@ -115,19 +115,23 @@ function benchLog(line) {
 }
 
 // Time one thread count in a fresh worker (a fresh realm, because the
-// pool size is fixed at first session creation). Null on any failure or
-// timeout — a failed count is skipped, never fatal.
+// pool size is fixed at first session creation). Resolves the full
+// chain result {visionMs, prefillMs, stepMs, totalMs} or null on any
+// failure or timeout — a failed count is skipped, never fatal. Timeout
+// 120s (a bound, not a target): the worker loads three models
+// (~122MB) and creates three sessions, so it needs more room than the
+// old step-only worker's 60s.
 function benchOneCount(threads) {
   return new Promise((resolve) => {
     let worker;
     try { worker = new Worker(chrome.runtime.getURL('src/background/ml-bench-worker.js')); } catch { resolve(null); return; }
-    const timer = setTimeout(() => { try { worker.terminate(); } catch {} resolve(null); }, 60000);
+    const timer = setTimeout(() => { try { worker.terminate(); } catch {} resolve(null); }, 120000);
     worker.onmessage = (e) => {
       const d = e && e.data;
       if (!d || d.type !== 'bench-result' || d.threads !== threads) return;
       clearTimeout(timer);
       try { worker.terminate(); } catch {}
-      resolve(d.ok && typeof d.medianMs === 'number' ? d.medianMs : null);
+      resolve(d.ok && typeof d.totalMs === 'number' ? { visionMs: d.visionMs, prefillMs: d.prefillMs, stepMs: d.stepMs, totalMs: d.totalMs } : null);
     };
     worker.onerror = () => { clearTimeout(timer); try { worker.terminate(); } catch {} resolve(null); };
     try { worker.postMessage({ type: 'bench', threads, steps: 20, warmup: 2 }); }
@@ -138,10 +142,14 @@ function benchOneCount(threads) {
 // Chrome 2.0.13: measure the best WASM thread count once, in the
 // background. Counts tried: a doubling spread up to the core count
 // (2.0.15: 10 cores -> 1,2,4,8,10; 18 cores -> 1,2,4,8,16,18).
-// Each count times 20 Baberu decoder steps in its own worker (median).
-// The winner is the smallest count within 5% of the fastest — same speed
-// for less CPU. Saved to storage.local (measuredThreads, with the core
-// count it was measured on); the next run uses it via threadsReady.
+// Each count times the FULL Baberu chain in its own worker (median
+// vision + median prefill + 20 steps, per representative crop; 2.0.20
+// — the old step-only timing could not prove the overall winner, since
+// the steps are only ~20% of OCR time and vision may scale the other
+// way). The winner is the smallest count within 5% of the lowest
+// total — same speed for less CPU. Saved to storage (measuredThreads,
+// with the core count it was measured on); the next run uses it via
+// threadsReady.
 // Skips on Firefox (no SharedArrayBuffer: every count would be 1 thread),
 // while a benchmark is already running, and when a result for this core
 // count already exists.
@@ -155,7 +163,10 @@ async function runThreadBenchmark() {
     const cores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
     try {
       const m = await readMeasuredThreads();
-      if (m && m.hardwareConcurrency === cores && Number.isInteger(m.threads)) {
+      // method 'full-chain' (2.0.20): an older step-only result has no
+      // method, so it is re-measured once with the full chain instead
+      // of being kept — the old number answered a different question.
+      if (m && m.method === 'full-chain' && m.hardwareConcurrency === cores && Number.isInteger(m.threads)) {
         benchLog('threads bench skipped: already measured ' + m.threads + ' threads');
         return;
       }
@@ -171,23 +182,23 @@ async function runThreadBenchmark() {
     benchLog('threads bench started, testing ' + counts.join(', ') + ' threads');
     const results = [];
     for (const n of counts) {
-      const ms = await benchOneCount(n);
-      if (ms != null) {
-        results.push({ threads: n, medianMs: ms });
-        benchLog('threads bench ' + n + ' threads: median ' + Math.round(ms * 10) / 10 + 'ms/step');
+      const r = await benchOneCount(n);
+      if (r != null) {
+        results.push({ threads: n, ...r });
+        benchLog('threads bench ' + n + ' threads: vision ' + Math.round(r.visionMs) + 'ms prefill ' + Math.round(r.prefillMs) + 'ms step ' + Math.round(r.stepMs * 10) / 10 + 'ms/step total ' + Math.round(r.totalMs) + 'ms/crop');
       } else {
         benchLog('threads bench ' + n + ' threads: failed');
       }
     }
     if (!results.length) { benchLog('threads bench: no count succeeded, keeping ' + cores + ' threads'); return; }
-    const minMs = Math.min(...results.map((r) => r.medianMs));
-    const best = results.filter((r) => r.medianMs <= minMs * 1.05).sort((a, b) => a.threads - b.threads)[0];
+    const minTotal = Math.min(...results.map((r) => r.totalMs));
+    const best = results.filter((r) => r.totalMs <= minTotal * 1.05).sort((a, b) => a.threads - b.threads)[0];
     const timings = {};
-    for (const r of results) timings[r.threads] = Math.round(r.medianMs * 10) / 10;
+    for (const r of results) timings[r.threads] = { vision: Math.round(r.visionMs * 10) / 10, prefill: Math.round(r.prefillMs * 10) / 10, step: Math.round(r.stepMs * 10) / 10, total: Math.round(r.totalMs * 10) / 10 };
     try {
-      await saveMeasuredThreads({ threads: best.threads, timings, hardwareConcurrency: cores, measuredAt: new Date().toISOString() });
+      await saveMeasuredThreads({ threads: best.threads, method: 'full-chain', timings, hardwareConcurrency: cores, measuredAt: new Date().toISOString() });
     } catch {}
-    benchLog('threads bench best ' + best.threads + ' threads (was ' + cores + '), median ' + Math.round(best.medianMs * 10) / 10 + 'ms/step — used from the next run');
+    benchLog('threads bench best ' + best.threads + ' threads (was ' + cores + '), total ' + Math.round(best.totalMs) + 'ms/crop — used from the next run');
   } finally {
     benchRunning = false;
   }
