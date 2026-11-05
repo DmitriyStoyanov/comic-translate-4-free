@@ -1,10 +1,9 @@
 # comic-translate-4-free
 
-**Bahasa:** [English](README.md) · [हिन्दी](README.hi.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [Español](README.es.md) · [العربية](README.ar.md) · [Français](README.fr.md) · [বাংলা](README.bn.md) · [Português](README.pt.md) · [Русский](README.ru.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [اردو](README.ur.md) · [Deutsch](README.de.md)
+**Bahasa:** [English](README.md) · [हिन्दी](README.hi.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [Español](README.es.md) · [العربية](README.ar.md) · [Français](README.fr.md) · [বাংলা](README.bn.md) · [Português](README.pt.md) · [Русский](README.ru.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [اردو](README.ur.md) · [Deutsch](README.de.md) · [Română](README.ro.md)
 
-Baca manga dalam bahasa Anda — langsung di browser.
-
-comic-translate-4-free menerjemahkan halaman manga dan komik secara otomatis saat Anda menjelajah. Ekstensi ini membaca bahasa Jepang, Inggris, Mandarin Sederhana dan Mandarin Tradisional (dengan deteksi otomatis), dan menerjemahkan ke 114 bahasa. Buka sebuah halaman, dan versi terjemahannya akan menggantikan gambar asli tepat di tempatnya — balon percakapan terisi dengan bahasa Anda.
+Baca manga dalam bahasamu!
+comic-translate-4-free menerjemahkan manga dan komik otomatis saat menjelajah. Membaca Jepang, Inggris, Tionghoa Sederhana/Tradisional (deteksi otomatis), dan menerjemahkan ke 114 bahasa, mengganti gambar di tempatnya.
 
 ### 📸 Sebelum & Sesudah
 
@@ -43,18 +42,18 @@ comic-translate-4-free menerjemahkan halaman manga dan komik secara otomatis saa
 
 ## ✨ Fitur
 
-- **Terjemahan otomatis** — buka halaman manga di situs yang diizinkan dan versi terjemahannya muncul tepat di tempatnya, tanpa perlu mengeklik tombol.
-- **Klik kanan pada gambar apa pun** — pilih "Send to comic-translate-4-free" untuk menerjemahkan gambar tertentu, bahkan yang lebih kecil dari ukuran minimum.
+- **Terjemahan otomatis** — buka halaman manga di situs yang diizinkan dan versi terjemahannya akan muncul di tempatnya, tanpa perlu mengeklik tombol.
+- **Klik kanan pada gambar apa pun** — pilih "Kirim ke comic-translate-4-free" untuk menerjemahkan gambar tertentu, bahkan yang lebih kecil dari ukuran minimum.
 - **114 bahasa target** melalui Google Translate, Azure Translator, atau server LM Studio lokal Anda sendiri.
-- **Deteksi otomatis bahasa sumber** — bahasa Jepang, Inggris, Mandarin Sederhana/Tradisional teridentifikasi secara otomatis dari teks hasil OCR.
-- **Dukungan strip panjang / webtoon** — halaman yang tinggi diproses dalam segmen yang saling tumpang tindih agar teks tetap tajam.
+- **Deteksi otomatis bahasa sumber** — bahasa Jepang, Inggris, Tionghoa Sederhana/Tradisional dikenali secara otomatis dari teks hasil OCR.
+- **Dukungan strip panjang / webtoon** — halaman tinggi diproses dalam segmen yang tumpang tindih sehingga teks tetap tajam.
 - **17 bahasa UI** — antarmuka ekstensi mengikuti pengaturan bahasa browser Anda.
 
 ### 🔒 Privasi
 
-- **AI berjalan di mesin Anda.** Deteksi balon, OCR, dan inpainting semuanya dijalankan secara lokal di browser Anda melalui WebAssembly. Halaman Anda tidak pernah meninggalkan perangkat Anda.
-- **Hanya teks terjemahan yang dikirim keluar** — hanya string yang diekstrak yang dikirim ke layanan terjemahan pilihan Anda (Google / Azure / LM Studio lokal Anda).
-- **Tanpa akun, tanpa pelacakan, tanpa telemetri.** Semua pengaturan dan model yang di-cache tetap tersimpan di penyimpanan lokal browser Anda.
+- **AI berjalan di komputer Anda.** Deteksi gelembung, OCR, dan inpainting semuanya berjalan secara lokal di browser Anda. Deteksi dan OCR berjalan melalui WebAssembly. Inpainting berjalan di GPU di Chrome (dengan fallback WebAssembly), dan melalui WebAssembly di Firefox. Halaman Anda tidak pernah meninggalkan perangkat Anda.
+- **Hanya teks terjemahan yang dikirim keluar** — hanya string yang diekstrak yang dikirim ke layanan terjemahan yang Anda pilih (Google / Azure / LM Studio lokal Anda).
+- **Tanpa akun, tanpa pelacakan, tanpa telemetri.** Semua pengaturan dan model yang di-cache tetap berada di penyimpanan lokal browser Anda.
 
 ---
 
@@ -66,9 +65,9 @@ comic-translate-4-free menerjemahkan halaman manga dan komik secara otomatis saa
 
 **Firefox:**
 
-[**Pasang dari Firefox Add-ons**](https://addons.mozilla.org/en-US/firefox/addon/comic-translate-4-free/) — satu klik, pembaruan otomatis.
+[**Pasang dari Firefox Add-ons**](https://addons.mozilla.org/en-US/firefox/addon/comic-translate-4-free/) — sekali klik, pembaruan otomatis.
 
-Setelah menginstal, buka halaman Settings dan klik **Unduh semua model** sekali (~350 MB: detektor, OCR, inpainter). Semuanya di-cache di browser dan diverifikasi berdasarkan ukuran byte.
+Setelah menginstal, buka halaman Pengaturan dan klik **Unduh semua model** sekali (~350 MB: detektor, OCR, inpainter). Model-model itu di-cache di browser dan diverifikasi berdasarkan ukuran byte.
 
 ![Downloading the models from the Settings page](docs/images/options-models.png)
 
@@ -80,36 +79,36 @@ Setelah menginstal, buka halaman Settings dan klik **Unduh semua model** sekali 
 
    ![Allow the site from the popup](docs/images/popup.png)
 
-2. **Muat ulang halaman manga** — terjemahan dimulai secara otomatis saat halaman dimuat. Sebuah pill di kanan atas menunjukkan progres langsung (Capturing → Detecting → OCR → …).
-3. **Selesai** — gambar halaman digantikan di tempatnya dengan versi terjemahan.
+2. **Muat ulang halaman manga** — terjemahan dimulai secara otomatis saat halaman dimuat. Sebuah pil di kanan atas menunjukkan progres langsung (Capturing → Detecting → OCR → …).
+3. **Selesai** — gambar halaman diganti di tempatnya dengan versi terjemahan.
 
 **Tips:**
-- Klik kanan pada gambar apa pun → **Kirim ke comic-translate-4-free** untuk menerjemahkan hanya gambar tersebut.
+- Klik kanan pada gambar apa pun → **Kirim ke comic-translate-4-free** untuk menerjemahkan hanya gambar itu.
 
   ![Right-click to send an image](docs/images/right-click.png)
 
-- Jika situs memblokir unduhan (HTTP 403), ekstensi otomatis mencoba ulang melalui tab latar belakang.
-- Pilih mesin terjemahan di Settings: Google (gratis, tanpa key), Azure Translator (ajukan key di bawah — 2 juta karakter/bulan gratis), atau LM Studio (server lokal).
-- Aktifkan **Mode debug** di Settings untuk memeriksa setiap tahap pipeline.
+- Jika sebuah situs memblokir unduhan (HTTP 403), ekstensi akan otomatis mencoba lagi melalui tab latar belakang.
+- Pilih mesin terjemahan Anda di Pengaturan: Google (gratis, tanpa kunci), Azure Translator (ajukan kunci di bawah — 2 jt karakter/bulan gratis), atau LM Studio (server lokal).
+- Aktifkan **Mode debug (pemeriksa tahap)** di Pengaturan untuk memeriksa setiap tahap pipeline.
 
 ---
 
-## 🔑 Mendaftar akun Microsoft Azure
+## 🔑 Ajukan akun Microsoft Azure
 
 Untuk menggunakan Azure Translator sebagai mesin terjemahan:
 
 1. Buat/masuk ke akun Microsoft/hotmail/Azure
 2. Buat langganan Azure
-3. Buat resource Azure Translator
-4. Pilih tingkat harga F0 (Free) — 2 juta karakter/bulan, tidak kedaluwarsa
-5. Resource Management → Keys and Endpoint → salin **KEY 1** dan **Location/Region**
-6. Tempelkan ke halaman Settings ekstensi
+3. Buat sumber daya Azure Translator
+4. Pilih tingkat harga F0 (Gratis) — 2 juta karakter/bulan, tidak kedaluwarsa
+5. Manajemen Sumber Daya → Kunci dan Endpoint → salin **KEY 1** dan **Location/Region**
+6. Tempel ke halaman Pengaturan ekstensi
 
 ---
 
 ## ❤️ Dukung proyek ini
 
-Jika ekstensi ini bermanfaat bagi Anda, pertimbangkan untuk mendukung pengembangannya:
+Jika ekstensi ini berguna bagi Anda, pertimbangkan untuk mendukung pengembangannya:
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/S5X627XJQW)
 
@@ -117,18 +116,19 @@ Jika ekstensi ini bermanfaat bagi Anda, pertimbangkan untuk mendukung pengembang
 
 ## ⚠️ Masalah yang Diketahui
 
-- **Belum ada OCR Korea** — bahasa sumber adalah Jepang, Inggris, dan Mandarin Sederhana/Tradisional. (Korea tetap tersedia sebagai bahasa target terjemahan.)
-- **Satu gambar per halaman** untuk terjemahan otomatis (gambar utama halaman). Gunakan klik kanan → Send untuk menerjemahkan yang lain.
-- **Sesi besar** — menerjemahkan puluhan gambar dalam satu sesi dapat membuat browser crash. Hapus cache halaman di Settings jika ini terjadi.
+- **Belum ada OCR Korea** — bahasa sumbernya adalah Jepang, Inggris, dan Tionghoa Sederhana/Tradisional. (Bahasa Korea tetap tersedia sebagai bahasa target terjemahan.)
+- **Satu gambar per halaman** untuk terjemahan otomatis (gambar utama halaman). Gunakan klik kanan → Kirim untuk menerjemahkan yang lain.
+- **Sesi besar** — menerjemahkan puluhan gambar dalam satu sesi dapat membuat browser crash. Hapus cache halaman di Pengaturan jika hal ini terjadi.
 - **Firefox** — model berjalan di halaman latar belakang (tanpa dokumen offscreen), berbagi memori dengan yang lain. Restart browser jika Anda melihat "no available backend found".
-- Google Translate menggunakan endpoint gratis yang tidak resmi dan mungkin dibatasi kecepatannya.
+- **Firefox lebih lambat daripada Chrome** — ekstensi Firefox tidak dapat menggunakan memori bersama untuk multi-threading (SharedArrayBuffer), jadi model berjalan pada satu thread CPU. Ini adalah batasan platform Firefox, bukan bug ekstensi. ([Bug Mozilla 1673477](https://bugzilla.mozilla.org/show_bug.cgi?id=1673477)).
+- Google Translate menggunakan endpoint gratis tidak resmi dan mungkin dibatasi kecepatannya.
 
 ---
 
 ## 📄 Pemberitahuan pihak ketiga
 
-Proyek ini terinspirasi oleh [ogkalu2/comic-translate](https://github.com/ogkalu2/comic-translate) — detektor balon/teks dan inpainter LaMa yang di-fine-tune untuk manga adalah ekspor ONNX miliknya, dan logika inferensinya diporting dari sana. (OCR menggunakan [Baberu](https://huggingface.co/genshiai-daichi/baberu-ocr) oleh genshiai-daichi.)
+Proyek ini terinspirasi oleh [ogkalu2/comic-translate](https://github.com/ogkalu2/comic-translate) — detektor gelembung/teks dan inpainter LaMa yang dilatih manga adalah ekspor ONNX-nya, dan logika inferensinya diporting darinya. (OCR menggunakan [Baberu](https://huggingface.co/genshiai-daichi/baberu-ocr) oleh genshiai-daichi.)
 
-Pustaka bawaan, kode yang diporting, dan model yang diunduh saat runtime tercantum beserta lisensinya di [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+Pustaka yang dibundel, kode yang diporting, dan model yang diunduh saat runtime dicantumkan beserta lisensinya di [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 Lisensi MIT — lihat [LICENSE](LICENSE).

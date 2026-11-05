@@ -1,10 +1,9 @@
 # comic-translate-4-free
 
-**Langue :** [English](README.md) · [हिन्दी](README.hi.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [Español](README.es.md) · [العربية](README.ar.md) · [Français](README.fr.md) · [বাংলা](README.bn.md) · [Português](README.pt.md) · [Русский](README.ru.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [اردو](README.ur.md) · [Deutsch](README.de.md)
+**Langue :** [English](README.md) · [हिन्दी](README.hi.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [Español](README.es.md) · [العربية](README.ar.md) · [Français](README.fr.md) · [বাংলা](README.bn.md) · [Português](README.pt.md) · [Русский](README.ru.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [اردو](README.ur.md) · [Deutsch](README.de.md) · [Română](README.ro.md)
 
-Lisez vos mangas dans votre langue — directement dans le navigateur.
-
-comic-translate-4-free traduit automatiquement les pages de mangas et de bandes dessinées pendant votre navigation. Il lit le japonais, l'anglais, le chinois simplifié et traditionnel (avec détection automatique), et traduit vers 114 langues. Ouvrez une page, et la version traduite remplace l'image d'origine en place — des bulles remplies dans votre langue.
+Lisez des mangas dans votre langue !
+comic-translate-4-free traduit mangas et BD automatiquement. Il lit japonais, anglais, chinois simplifié/traditionnel (détection auto), et traduit vers 114 langues, remplaçant l'image sur place.
 
 ### 📸 Avant & Après
 
@@ -43,18 +42,18 @@ comic-translate-4-free traduit automatiquement les pages de mangas et de bandes 
 
 ## ✨ Fonctionnalités
 
-- **Traduction automatique** — ouvrez une page de manga sur un site autorisé et la version traduite apparaît en place, sans cliquer sur aucun bouton.
-- **Clic droit sur n'importe quelle image** — choisissez « Send to comic-translate-4-free » pour traduire une image précise, même plus petite que la taille minimale.
+- **Traduction automatique** — ouvrez une page de manga sur un site autorisé et la version traduite apparaît sur place, sans avoir besoin de cliquer sur un bouton.
+- **Clic droit sur n'importe quelle image** — choisissez « Envoyer vers comic-translate-4-free » pour traduire une image précise, même si elle est plus petite que la taille minimale.
 - **114 langues cibles** via Google Translate, Azure Translator ou votre propre serveur local LM Studio.
-- **Détection automatique de la langue source** — le japonais, l'anglais et le chinois simplifié/traditionnel sont identifiés automatiquement à partir du texte reconnu par OCR.
-- **Prise en charge des bandes longues / webtoons** — les pages très hautes sont traitées en segments qui se chevauchent pour que le texte reste net.
+- **Détection automatique de la langue source** — le japonais, l'anglais, le chinois simplifié/traditionnel sont identifiés automatiquement à partir du texte lu par OCR.
+- **Prise en charge des longues bandes / webtoons** — les pages hautes sont traitées en segments qui se chevauchent pour que le texte reste net.
 - **17 langues d'interface** — l'interface de l'extension suit le réglage de langue de votre navigateur.
 
 ### 🔒 Confidentialité
 
-- **L'IA tourne sur votre machine.** La détection des bulles, la reconnaissance optique de caractères (OCR) et l'inpainting s'exécutent localement dans votre navigateur via WebAssembly. Vos pages ne quittent jamais votre appareil.
-- **Seul le texte traduit est envoyé** — seules les chaînes extraites sont transmises au service de traduction que vous choisissez (Google / Azure / votre LM Studio local).
-- **Ni compte, ni suivi, ni télémétrie.** Tous vos réglages et les modèles mis en cache restent dans le stockage local de votre navigateur.
+- **L'IA tourne sur votre machine.** La détection des bulles, l'OCR et l'inpainting tournent tous localement dans votre navigateur. La détection et l'OCR tournent via WebAssembly. L'inpainting tourne sur GPU dans Chrome (avec repli WebAssembly), et via WebAssembly dans Firefox. Vos pages ne quittent jamais votre appareil.
+- **Seul le texte traduit est envoyé** — seules les chaînes extraites vont vers le service de traduction que vous choisissez (Google / Azure / votre LM Studio local).
+- **Aucun compte, aucun suivi, aucune télémétrie.** Tous les réglages et modèles en cache restent dans le stockage local de votre navigateur.
 
 ---
 
@@ -68,29 +67,29 @@ comic-translate-4-free traduit automatiquement les pages de mangas et de bandes 
 
 [**Installer depuis Firefox Add-ons**](https://addons.mozilla.org/en-US/firefox/addon/comic-translate-4-free/) — en un clic, mises à jour automatiques.
 
-Après l'installation, ouvrez la page des réglages et cliquez une fois sur **Télécharger tous les modèles** (~350 Mo : détecteur, OCR, inpainter). Ils sont mis en cache dans le navigateur et vérifiés par taille d'octets.
+Après l'installation, ouvrez la page Paramètres et cliquez une fois sur **Télécharger tous les modèles** (~350 Mo : détecteur, OCR, inpainter). Ils sont mis en cache dans le navigateur et vérifiés par taille en octets.
 
 ![Téléchargement des modèles depuis la page des réglages](docs/images/options-models.png)
 
 ---
 
-## 💡 Mode d'emploi
+## 💡 Comment l'utiliser
 
 1. **Autorisez d'abord le site** — cliquez sur l'icône de l'extension et appuyez sur **Autoriser ce site** (ou activez **Autoriser tous les sites**). La traduction ne s'exécute que là où vous avez accordé l'autorisation.
 
    ![Autoriser le site depuis la fenêtre popup](docs/images/popup.png)
 
-2. **Rechargez la page de manga** — la traduction démarre automatiquement au chargement de la page. Une pastille en haut à droite affiche la progression en direct (Capturing → Detecting → OCR → …).
-3. **C'est fait** — l'image de la page est remplacée en place par la version traduite.
+2. **Rechargez la page de manga** — elle commence à traduire automatiquement quand la page se charge. Une pastille en haut à droite montre la progression en direct (Capturing → Detecting → OCR → …).
+3. **Terminé** — l'image de la page est remplacée sur place par la version traduite.
 
-**Astuces :**
-- Clic droit sur n'importe quelle image → **Envoyer vers comic-translate-4-free** pour ne traduire que cette image.
+**Conseils :**
+- Clic droit sur n'importe quelle image → **Envoyer vers comic-translate-4-free** pour traduire juste cette image.
 
   ![Clic droit pour envoyer une image](docs/images/right-click.png)
 
-- Si un site bloque les téléchargements (HTTP 403), l'extension réessaie automatiquement via un onglet d'arrière-plan.
-- Choisissez votre moteur de traduction dans les réglages : Google (gratuit, sans clé), Azure Translator (demandez vos clés ci-dessous — 2 millions de caractères/mois gratuits) ou LM Studio (serveur local).
-- Activez **Mode débogage** dans les réglages pour inspecter chaque étape du pipeline.
+- Si un site bloque les téléchargements (HTTP 403), l'extension réessaie automatiquement via un onglet en arrière-plan.
+- Choisissez votre moteur de traduction dans Paramètres : Google (gratuit, sans clé), Azure Translator (demandez les clés ci-dessous — 2 millions de caractères/mois gratuits) ou LM Studio (serveur local).
+- Activez le **Mode débogage** (inspecteur d'étapes) dans Paramètres pour inspecter chaque étape du pipeline.
 
 ---
 
@@ -101,9 +100,9 @@ Pour utiliser Azure Translator comme moteur de traduction :
 1. Créez un compte Microsoft/hotmail/Azure ou connectez-vous
 2. Créez un abonnement Azure
 3. Créez une ressource Azure Translator
-4. Sélectionnez la formule F0 (gratuite) — 2 millions de caractères/mois, sans expiration
+4. Sélectionnez le niveau de tarification F0 (gratuit) — 2 millions de caractères/mois, sans expiration
 5. Gestion des ressources → Clés et point de terminaison → copiez **KEY 1** et **Location/Region**
-6. Collez-les dans la page des réglages de l'extension
+6. Collez-les dans la page Paramètres de l'extension
 
 ---
 
@@ -117,18 +116,19 @@ Si cette extension vous est utile, pensez à soutenir son développement :
 
 ## ⚠️ Problèmes connus
 
-- **Pas encore d'OCR pour le coréen** — les langues sources sont le japonais, l'anglais et le chinois simplifié/traditionnel. (Le coréen reste disponible comme langue cible.)
-- **Une image par page** pour la traduction automatique (l'image principale de la page). Utilisez le clic droit → Send pour traduire les autres.
-- **Sessions volumineuses** — traduire des dizaines d'images en une seule session peut faire planter le navigateur. Videz le cache de pages dans les réglages si cela se produit.
-- **Firefox** — les modèles tournent dans la page d'arrière-plan (pas de documents offscreen) et partagent la mémoire avec tout le reste. Redémarrez le navigateur si vous voyez « no available backend found ».
+- **Pas encore d'OCR coréen** — les langues sources sont le japonais, l'anglais et le chinois simplifié/traditionnel. (Le coréen reste disponible comme langue de traduction.)
+- **Une image par page** pour la traduction automatique (l'image principale de la page). Utilisez clic droit → Envoyer pour traduire les autres.
+- **Grosses sessions** — traduire des dizaines d'images en une session peut faire planter le navigateur. Videz le cache de la page dans Paramètres si cela arrive.
+- **Firefox** — les modèles tournent dans la page d'arrière-plan (sans documents offscreen), en partageant la mémoire avec tout le reste. Redémarrez le navigateur si vous voyez « no available backend found ».
+- **Firefox est plus lent que Chrome** — les extensions Firefox ne peuvent pas utiliser la mémoire partagée pour le multithreading (SharedArrayBuffer), donc le modèle tourne sur un seul thread CPU. C'est une limite de la plateforme Firefox, pas un bug de l'extension. ([Bug Mozilla 1673477](https://bugzilla.mozilla.org/show_bug.cgi?id=1673477)).
 - Google Translate utilise le point de terminaison gratuit non officiel et peut être limité en débit.
 
 ---
 
-## 📄 Mentions relatives aux logiciels tiers
+## 📄 Avis de tiers
 
-Ce projet est inspiré de [ogkalu2/comic-translate](https://github.com/ogkalu2/comic-translate) — le détecteur de bulles/texte et l'inpainter LaMa entraîné pour le manga sont ses exports ONNX, et la logique d'inférence en est portée. (L'OCR utilise [Baberu](https://huggingface.co/genshiai-daichi/baberu-ocr) par genshiai-daichi.)
+Ce projet s'inspire de [ogkalu2/comic-translate](https://github.com/ogkalu2/comic-translate) — le détecteur de bulles/texte et l'inpainter LaMa entraîné sur le manga sont ses exports ONNX, et la logique d'inférence en est portée. (L'OCR utilise [Baberu](https://huggingface.co/genshiai-daichi/baberu-ocr) de genshiai-daichi.)
 
-Les bibliothèques intégrées, le code porté et les modèles téléchargés à l'exécution sont listés avec leurs licences dans [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+Les bibliothèques incluses, le code porté et les modèles téléchargés à l'exécution sont listés avec leurs licences dans [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 Licence MIT — voir [LICENSE](LICENSE).

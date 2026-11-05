@@ -1,10 +1,9 @@
 # comic-translate-4-free
 
-**Sprache:** [English](README.md) · [हिन्दी](README.hi.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [Español](README.es.md) · [العربية](README.ar.md) · [Français](README.fr.md) · [বাংলা](README.bn.md) · [Português](README.pt.md) · [Русский](README.ru.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [اردو](README.ur.md) · [Deutsch](README.de.md)
+**Sprache:** [English](README.md) · [हिन्दी](README.hi.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [Español](README.es.md) · [العربية](README.ar.md) · [Français](README.fr.md) · [বাংলা](README.bn.md) · [Português](README.pt.md) · [Русский](README.ru.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [اردو](README.ur.md) · [Deutsch](README.de.md) · [Română](README.ro.md)
 
-Lesen Sie Manga in Ihrer Sprache — direkt im Browser.
-
-comic-translate-4-free übersetzt Manga- und Comicseiten beim Surfen automatisch. Es liest Japanisch, Englisch, Vereinfachtes und Traditionelles Chinesisch (mit automatischer Erkennung) und übersetzt in 114 Sprachen. Öffnen Sie eine Seite, und die übersetzte Version ersetzt das Originalbild direkt an Ort und Stelle — Sprechblasen, gefüllt mit Ihrer Sprache.
+Lies Manga in deiner Sprache!
+comic-translate-4-free übersetzt Manga und Comics automatisch. Es liest Japanisch, Englisch, Vereinfachtes/Traditionelles Chinesisch (Auto-Erkennung) und übersetzt in 114 Sprachen, ersetzt das Bild an Ort und Stelle.
 
 ### 📸 Vorher & Nachher
 
@@ -43,18 +42,18 @@ comic-translate-4-free übersetzt Manga- und Comicseiten beim Surfen automatisch
 
 ## ✨ Funktionen
 
-- **Automatische Übersetzung** — Öffnen Sie eine Manga-Seite auf einer zugelassenen Website, und die übersetzte Version erscheint direkt an Ort und Stelle, ganz ohne Klick.
-- **Rechtsklick auf jedes Bild** — wählen Sie „Send to comic-translate-4-free", um ein bestimmtes Bild zu übersetzen, selbst wenn es kleiner als die Mindestgröße ist.
-- **114 Zielsprachen** über Google Translate, Azure Translator oder Ihren eigenen lokalen LM-Studio-Server.
-- **Automatische Spracherkennung** — Japanisch, Englisch sowie Vereinfachtes/Traditionelles Chinesisch werden automatisch aus dem per OCR erkannten Text identifiziert.
-- **Long-Strip-/Webtoon-Unterstützung** — sehr hohe Seiten werden in überlappenden Segmenten verarbeitet, damit der Text scharf bleibt.
-- **17 UI-Sprachen** — die Benutzeroberfläche der Erweiterung folgt der Spracheinstellung Ihres Browsers.
+- **Automatische Übersetzung** — öffne eine Mangaseite auf einer erlaubten Website, und die übersetzte Version erscheint an Ort und Stelle, ganz ohne Klick.
+- **Rechtsklick auf ein beliebiges Bild** — wähle „An comic-translate-4-free senden“, um ein bestimmtes Bild zu übersetzen, auch wenn es kleiner als die Mindestgröße ist.
+- **114 Zielsprachen** über Google Translate, Azure Translator oder deinen eigenen lokalen LM-Studio-Server.
+- **Automatische Quellspracherkennung** — Japanisch, Englisch, Vereinfachtes/Traditionelles Chinesisch werden automatisch aus dem per OCR gelesenen Text erkannt.
+- **Unterstützung für lange Strips / Webtoons** — hohe Seiten werden in überlappenden Abschnitten verarbeitet, damit der Text scharf bleibt.
+- **17 UI-Sprachen** — die Oberfläche der Erweiterung folgt der Spracheinstellung deines Browsers.
 
 ### 🔒 Datenschutz
 
-- **Die KI läuft auf Ihrem Rechner.** Sprechblasenerkennung, OCR und Inpainting laufen lokal in Ihrem Browser per WebAssembly. Ihre Seiten verlassen niemals Ihr Gerät.
-- **Nur der übersetzte Text wird gesendet** — lediglich die extrahierten Zeichenfolgen gehen an den von Ihnen gewählten Übersetzungsdienst (Google / Azure / Ihr lokales LM Studio).
-- **Kein Konto, kein Tracking, keine Telemetrie.** Alle Einstellungen und zwischengespeicherten Modelle bleiben im lokalen Speicher Ihres Browsers.
+- **Die KI läuft auf deinem Rechner.** Blasenerkennung, OCR und Inpainting laufen alle lokal in deinem Browser. Erkennung und OCR laufen über WebAssembly. Inpainting läuft in Chrome auf der GPU (mit WebAssembly-Fallback) und in Firefox über WebAssembly. Deine Seiten verlassen dein Gerät nie.
+- **Nur übersetzter Text wird nach außen gesendet** — nur die extrahierten Zeichenketten gehen an den Übersetzungsdienst deiner Wahl (Google / Azure / dein lokales LM Studio).
+- **Kein Konto, kein Tracking, keine Telemetrie.** Alle Einstellungen und zwischengespeicherten Modelle bleiben im lokalen Speicher deines Browsers.
 
 ---
 
@@ -68,48 +67,48 @@ comic-translate-4-free übersetzt Manga- und Comicseiten beim Surfen automatisch
 
 [**Aus Firefox Add-ons installieren**](https://addons.mozilla.org/en-US/firefox/addon/comic-translate-4-free/) — ein Klick, automatische Updates.
 
-Öffnen Sie nach der Installation die Einstellungsseite und klicken Sie einmal auf **Alle Modelle herunterladen** (~350 MB: Detektor, OCR, Inpainter). Sie werden im Browser zwischengespeichert und anhand der Byte-Größe verifiziert.
+Öffne nach der Installation die Einstellungen und klicke einmal auf **Alle Modelle herunterladen** (~350 MB: Detektor, OCR, Inpainter). Sie werden im Browser zwischengespeichert und anhand der Byte-Größe geprüft.
 
 ![Die Modelle von der Einstellungsseite herunterladen](docs/images/options-models.png)
 
 ---
 
-## 💡 Verwendung
+## 💡 So benutzt du es
 
-1. **Zuerst die Website freigeben** — klicken Sie auf das Erweiterungssymbol und drücken Sie **Diese Website zulassen** (oder aktivieren Sie **Alle Websites zulassen**). Die Übersetzung läuft nur dort, wo Sie die Berechtigung erteilt haben.
+1. **Erlaube zuerst die Website** — klicke auf das Erweiterungssymbol und drücke **Diese Website zulassen** (oder aktiviere **Alle Websites zulassen**). Die Übersetzung läuft nur dort, wo du die Erlaubnis erteilt hast.
 
    ![Die Website über das Popup freigeben](docs/images/popup.png)
 
-2. **Manga-Seite neu laden** — beim Laden der Seite beginnt die Übersetzung automatisch. Eine Pille oben rechts zeigt den Live-Fortschritt (Capturing → Detecting → OCR → …).
-3. **Fertig** — das Bild der Seite wird direkt durch die übersetzte Version ersetzt.
+2. **Lade die Mangaseite neu** — sie beginnt automatisch zu übersetzen, sobald die Seite lädt. Eine Pille oben rechts zeigt den Live-Fortschritt (Capturing → Detecting → OCR → …).
+3. **Fertig** — das Bild der Seite wird an Ort und Stelle durch die übersetzte Version ersetzt.
 
 **Tipps:**
 - Rechtsklick auf ein beliebiges Bild → **An comic-translate-4-free senden**, um nur dieses Bild zu übersetzen.
 
   ![Rechtsklick, um ein Bild zu senden](docs/images/right-click.png)
 
-- Blockiert eine Website Downloads (HTTP 403), versucht es die Erweiterung automatisch über einen Hintergrund-Tab erneut.
-- Wählen Sie Ihre Übersetzungs-Engine in den Einstellungen: Google (kostenlos, kein Schlüssel), Azure Translator (Schlüssel unten beantragen — 2 Mio. Zeichen/Monat kostenlos) oder LM Studio (lokaler Server).
-- Aktivieren Sie den **Debug-Modus** in den Einstellungen, um jede Pipeline-Stufe zu prüfen.
+- Wenn eine Website Downloads blockiert (HTTP 403), versucht es die Erweiterung automatisch über einen Hintergrund-Tab erneut.
+- Wähle deine Übersetzungs-Engine in den Einstellungen: Google (kostenlos, kein Schlüssel), Azure Translator (Schlüssel unten beantragen — 2 Mio. Zeichen/Monat kostenlos) oder LM Studio (lokaler Server).
+- Aktiviere den **Debug-Modus** (Stufen-Inspektor) in den Einstellungen, um jede Pipeline-Stufe zu prüfen.
 
 ---
 
-## 🔑 Ein Microsoft-Azure-Konto beantragen
+## 🔑 Microsoft-Azure-Konto beantragen
 
 Um Azure Translator als Übersetzungs-Engine zu verwenden:
 
-1. Ein Microsoft-/Hotmail-/Azure-Konto erstellen oder sich anmelden
-2. Ein Azure-Abonnement erstellen
-3. Eine Azure-Translator-Ressource erstellen
-4. Die Preisstufe F0 (kostenlos) wählen — 2 Millionen Zeichen/Monat, läuft nicht ab
+1. Microsoft-/Hotmail-/Azure-Konto erstellen oder anmelden
+2. Azure-Abonnement erstellen
+3. Azure-Translator-Ressource erstellen
+4. Preistarif F0 (kostenlos) auswählen — 2 Mio. Zeichen/Monat, läuft nicht ab
 5. Ressourcenverwaltung → Schlüssel und Endpunkt → **KEY 1** und **Location/Region** kopieren
-6. Beides auf der Einstellungsseite der Erweiterung einfügen
+6. In die Einstellungsseite der Erweiterung einfügen
 
 ---
 
-## ❤️ Dieses Projekt unterstützen
+## ❤️ Unterstütze dieses Projekt
 
-Wenn Ihnen diese Erweiterung nützlich ist, unterstützen Sie bitte ihre Weiterentwicklung:
+Wenn dir diese Erweiterung nützlich ist, erwäge, ihre Entwicklung zu unterstützen:
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/S5X627XJQW)
 
@@ -117,18 +116,19 @@ Wenn Ihnen diese Erweiterung nützlich ist, unterstützen Sie bitte ihre Weitere
 
 ## ⚠️ Bekannte Probleme
 
-- **Noch kein koreanisches OCR** — Quellsprachen sind Japanisch, Englisch sowie Vereinfachtes/Traditionelles Chinesisch. (Koreanisch bleibt als Übersetzungsziel verfügbar.)
-- **Ein Bild pro Seite** für die automatische Übersetzung (das Hauptbild der Seite). Verwenden Sie Rechtsklick → Senden, um andere zu übersetzen.
-- **Große Sitzungen** — die Übersetzung von Dutzenden Bildern in einer Sitzung kann den Browser zum Absturz bringen. Leeren Sie in diesem Fall den Seitencache in den Einstellungen.
-- **Firefox** — die Modelle laufen auf der Hintergrundseite (keine Offscreen-Dokumente) und teilen sich den Speicher mit allem anderen. Starten Sie den Browser neu, wenn Sie „no available backend found" sehen.
-- Google Translate nutzt den inoffiziellen kostenlosen Endpunkt und kann gedrosselt werden.
+- **Noch kein koreanisches OCR** — Quellsprachen sind Japanisch, Englisch und Vereinfachtes/Traditionelles Chinesisch. (Koreanisch bleibt als Übersetzungssprache verfügbar.)
+- **Ein Bild pro Seite** für die automatische Übersetzung (das Hauptbild der Seite). Verwende Rechtsklick → Senden, um andere zu übersetzen.
+- **Große Sitzungen** — das Übersetzen von Dutzenden Bildern in einer Sitzung kann den Browser zum Absturz bringen. Leere in diesem Fall den Seiten-Cache in den Einstellungen.
+- **Firefox** — die Modelle laufen auf der Hintergrundseite (ohne Offscreen-Dokumente) und teilen sich den Speicher mit allem anderen. Starte den Browser neu, wenn du „no available backend found“ siehst.
+- **Firefox ist langsamer als Chrome** — Firefox-Erweiterungen können keinen gemeinsamen Speicher für Multithreading (SharedArrayBuffer) verwenden, daher läuft das Modell auf einem einzigen CPU-Thread. Das ist eine Grenze der Firefox-Plattform, kein Fehler der Erweiterung. ([Mozilla-Bug 1673477](https://bugzilla.mozilla.org/show_bug.cgi?id=1673477)).
+- Google Translate nutzt den inoffiziellen kostenlosen Endpunkt und kann ratenbegrenzt sein.
 
 ---
 
-## 📄 Hinweise zu Drittanbieter-Software
+## 📄 Hinweise zu Drittanbietern
 
-Dieses Projekt ist inspiriert von [ogkalu2/comic-translate](https://github.com/ogkalu2/comic-translate) — der Sprechblasen-/Texterkenner und der Manga-finetunede LaMa-Inpainter sind dessen ONNX-Exporte, und die Inferenzlogik ist daraus portiert. (OCR verwendet [Baberu](https://huggingface.co/genshiai-daichi/baberu-ocr) von genshiai-daichi.)
+Dieses Projekt ist inspiriert von [ogkalu2/comic-translate](https://github.com/ogkalu2/comic-translate) — der Blasen-/Textdetektor und der manga-trainierte LaMa-Inpainter sind dessen ONNX-Exporte, und die Inferenzlogik ist daraus portiert. (OCR verwendet [Baberu](https://huggingface.co/genshiai-daichi/baberu-ocr) von genshiai-daichi.)
 
-Mitgelieferte Bibliotheken, portierter Code und zur Laufzeit heruntergeladene Modelle sind mit ihren Lizenzen in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) aufgeführt.
+Gebündelte Bibliotheken, portierter Code und zur Laufzeit heruntergeladene Modelle sind mit ihren Lizenzen in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) aufgeführt.
 
 MIT-Lizenz — siehe [LICENSE](LICENSE).
