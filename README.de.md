@@ -48,7 +48,7 @@ comic-translate-4-free übersetzt Manga- und Comicseiten beim Surfen automatisch
 - **114 Zielsprachen** über Google Translate, Azure Translator oder Ihren eigenen lokalen LM-Studio-Server.
 - **Automatische Spracherkennung** — Japanisch, Englisch sowie Vereinfachtes/Traditionelles Chinesisch werden automatisch aus dem per OCR erkannten Text identifiziert.
 - **Long-Strip-/Webtoon-Unterstützung** — sehr hohe Seiten werden in überlappenden Segmenten verarbeitet, damit der Text scharf bleibt.
-- **16 UI-Sprachen** — die Benutzeroberfläche der Erweiterung folgt der Spracheinstellung Ihres Browsers.
+- **17 UI-Sprachen** — die Benutzeroberfläche der Erweiterung folgt der Spracheinstellung Ihres Browsers.
 
 ### 🔒 Datenschutz
 

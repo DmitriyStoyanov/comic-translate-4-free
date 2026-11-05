@@ -48,7 +48,7 @@ O comic-translate-4-free traduz páginas de mangás e quadrinhos automaticamente
 - **114 idiomas de destino** via Google Tradutor, Azure Translator ou seu próprio servidor LM Studio local.
 - **Detecção automática do idioma de origem** — japonês, inglês, chinês simplificado/tradicional identificados automaticamente a partir do texto reconhecido pelo OCR.
 - **Suporte a páginas longas / webtoon** — páginas altas são processadas em segmentos sobrepostos para manter o texto nítido.
-- **16 idiomas na interface** — a interface da extensão acompanha o idioma do seu navegador.
+- **17 idiomas na interface** — a interface da extensão acompanha o idioma do seu navegador.
 
 ### 🔒 Privacidade
 

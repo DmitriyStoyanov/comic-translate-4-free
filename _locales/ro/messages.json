@@ -1,0 +1,418 @@
+{
+  "add": {
+    "message": "Adaugă"
+  },
+  "appDesc": {
+    "message": "Traduce pagini de manga și benzi desenate în browser: detectare, OCR, inpainting, traducere. Tot ML-ul rulează local."
+  },
+  "appName": {
+    "message": "comic-translate-4-free"
+  },
+  "auto_hint": {
+    "message": "Când este activat, paginile permise încep să se traducă automat imediat ce se termină de încărcat — fără să fie nevoie de clic. (Sfat: permite un site din fereastra popup, ca extensia să aibă permisiunea de a-i citi imaginile.)"
+  },
+  "auto_translate": {
+    "message": "Traducere automată la încărcarea paginii"
+  },
+  "play_ding": {
+    "message": "Redă un sunet când traducerea se termină"
+  },
+  "automation": {
+    "message": "Automatizare"
+  },
+  "azure_key": {
+    "message": "Cheie API Azure"
+  },
+  "azure_region": {
+    "message": "Regiune Azure"
+  },
+  "azure_region_ph": {
+    "message": "ex. japaneast"
+  },
+  "backend": {
+    "message": "Motor de traducere"
+  },
+  "backend_failover": {
+    "message": "Dacă motorul eșuează, încearcă altul",
+    "description": "Checkbox: try another translation backend if the selected one fails"
+  },
+  "backend_azure": {
+    "message": "Azure Translator"
+  },
+  "backend_azure_opt": {
+    "message": "Azure Translator (necesită cheie)"
+  },
+  "backend_google": {
+    "message": "Google (gratuit)"
+  },
+  "backend_google_opt": {
+    "message": "Google (gratuit, fără cheie)"
+  },
+  "backend_hint": {
+    "message": "Cheia/regiunea Azure sunt stocate doar în spațiul de stocare al extensiei din acest browser. LM Studio trebuie să ruleze cu serverul compatibil OpenAI activat (implicit http://127.0.0.1:1234)."
+  },
+  "backend_lmstudio": {
+    "message": "LM Studio (local)"
+  },
+  "backend_lmstudio_opt": {
+    "message": "LM Studio (server local)"
+  },
+  "cancel": {
+    "message": "Anulează"
+  },
+  "check_azure": {
+    "message": "Verifică conexiunea Azure"
+  },
+  "check_lmstudio": {
+    "message": "Verifică conexiunea LM Studio"
+  },
+  "ctx_send_image": {
+    "message": "Trimite la comic-translate-4-free",
+    "description": "Context menu item on images: send this image to the translation pipeline"
+  },
+  "err_bypass_tip": {
+    "message": "Sfat: dă clic dreapta pe imagine și alege „$1” pentru a ocoli acest blocaj.",
+    "description": "Tip shown before a 403 download error: right-click the image to bypass the block. $1 = localized \"Send to comic-translate-4-free\" menu label.",
+    "placeholders": {
+      "menu_label": {
+        "content": "$1",
+        "example": "Send to comic-translate-4-free"
+      }
+    }
+  },
+  "debug": {
+    "message": "Depanare"
+  },
+  "debug_hint": {
+    "message": "Afișează rezultatul fiecărei etape a procesului într-un panou lateral, ca fiecare etapă să poată fi verificată."
+  },
+  "debug_mode": {
+    "message": "Mod depanare (inspector de etape)"
+  },
+  "delete": {
+    "message": "Șterge"
+  },
+  "det_threshold": {
+    "message": "Prag de încredere pentru detectare"
+  },
+  "detection_hint": {
+    "message": "Paginile mai mici decât dimensiunea minimă a imaginii sunt ignorate. Dimensiunea fontului de redare este estimată automat din textul original de pe pagină (limitată de valoarea maximă de mai sus)."
+  },
+  "detection_rendering": {
+    "message": "Detectare și redare"
+  },
+  "download": {
+    "message": "Descarcă"
+  },
+  "download_all": {
+    "message": "Descarcă toate modelele"
+  },
+  "downloaded": {
+    "message": "✓ descărcat ($SIZE$)",
+    "placeholders": {
+      "size": {
+        "content": "$1"
+      }
+    }
+  },
+  "grant_access": {
+    "message": "Acordă accesul"
+  },
+  "grant_access_to": {
+    "message": "Acordă accesul la $HOST$",
+    "placeholders": {
+      "host": {
+        "content": "$1"
+      }
+    }
+  },
+  "grant_warning": {
+    "message": "Permis, dar extensia nu are acces la acest site — traducerea nu poate începe."
+  },
+  "languages": {
+    "message": "Limbi"
+  },
+  "lmstudio_api": {
+    "message": "API LM Studio"
+  },
+  "lmstudio_api_openai": {
+    "message": "Compatibil OpenAI (/v1/chat/completions)"
+  },
+  "lmstudio_api_v1": {
+    "message": "API REST LM Studio v1 (/api/v1/chat)"
+  },
+  "lmstudio_key": {
+    "message": "Cheie API LM Studio (opțional)"
+  },
+  "lmstudio_url": {
+    "message": "URL server LM Studio"
+  },
+  "max_font_size": {
+    "message": "Dimensiune maximă a fontului (px)"
+  },
+  "min_font_size": {
+    "message": "Dimensiune minimă a fontului (px)"
+  },
+  "min_image_size": {
+    "message": "Dimensiune minimă a imaginii (px)"
+  },
+  "model_baberu": {
+    "message": "Baberu OCR (japoneză + engleză + chineză simplificată, antrenat pe manga v1.1)"
+  },
+  "model_detector": {
+    "message": "Detector de text (RT-DETR-v2)"
+  },
+  "model_inpaint": {
+    "message": "Inpainter LaMa (manga)"
+  },
+  "models": {
+    "message": "Modele"
+  },
+  "models_hint": {
+    "message": "Modelele sunt descărcate o dată de pe Hugging Face și stocate în cache în browser (IndexedDB)."
+  },
+  "no_site": {
+    "message": "niciun site detectat"
+  },
+  "not_whitelisted": {
+    "message": "nepermis"
+  },
+  "options_settings": {
+    "message": "Setări"
+  },
+  "options_title": {
+    "message": "Setări"
+  },
+  "redownload": {
+    "message": "Descarcă din nou"
+  },
+  "required_badge": {
+    "message": "obligatoriu"
+  },
+  "saved": {
+    "message": "Salvat ✓"
+  },
+  "site_this": {
+    "message": "acest site: $HOST$ — $STATUS$",
+    "placeholders": {
+      "host": {
+        "content": "$1"
+      },
+      "status": {
+        "content": "$2"
+      }
+    }
+  },
+  "site_whitelist": {
+    "message": "Acces la site"
+  },
+  "source_lang": {
+    "message": "Limba sursă"
+  },
+  "source_auto": {
+    "message": "Detectare automată"
+  },
+  "target_lang": {
+    "message": "Limba țintă"
+  },
+  "translate_page": {
+    "message": "Traduce această pagină"
+  },
+  "translation_backend": {
+    "message": "Motor de traducere"
+  },
+  "whitelist_add": {
+    "message": "Permite acest site"
+  },
+  "whitelist_desc": {
+    "message": "Traducerea rulează doar pe site-urile pe care le permiți. Adaugă un site din fereastra popup sau tastează numele său de gazdă aici."
+  },
+  "whitelist_remove": {
+    "message": "Interzice acest site"
+  },
+  "whitelisted": {
+    "message": "permis ✓"
+  },
+  "wl_placeholder": {
+    "message": "ex. example.com"
+  },
+  "whitelist_empty": {
+    "message": "gol — traducerea este dezactivată peste tot până permiți un site"
+  },
+  "remove": {
+    "message": "Elimină"
+  },
+  "checking": {
+    "message": "se verifică…"
+  },
+  "download_failed": {
+    "message": "✗ descărcarea a eșuat: $ERR$",
+    "placeholders": {
+      "err": {
+        "content": "$1"
+      }
+    }
+  },
+  "downloading": {
+    "message": "se descarcă… $PCT$%",
+    "placeholders": {
+      "pct": {
+        "content": "$1"
+      }
+    }
+  },
+  "bg_unreachable": {
+    "message": "nu s-a putut ajunge la serviciul de fundal"
+  },
+  "bg_unreachable_hint": {
+    "message": "Încearcă să reîncarci extensia la about:debugging, apoi redeschide această pagină."
+  },
+  "stage_idle": {
+    "message": "inactiv"
+  },
+  "stage_capture": {
+    "message": "Se captează pagina…"
+  },
+  "stage_detect": {
+    "message": "Se detectează bulele și textul…"
+  },
+  "stage_blocks": {
+    "message": "Se asamblează blocurile de text…"
+  },
+  "stage_ocr": {
+    "message": "Se citește textul (OCR)…"
+  },
+  "stage_mask": {
+    "message": "Se construiesc măștile…"
+  },
+  "stage_inpaint": {
+    "message": "Inpainting…"
+  },
+  "stage_translate": {
+    "message": "Se traduce…"
+  },
+  "stage_render": {
+    "message": "Se redă…"
+  },
+  "stage_done": {
+    "message": "Gata"
+  },
+  "stage_cancelled": {
+    "message": "Anulat"
+  },
+  "stage_error": {
+    "message": "Eroare"
+  },
+  "downloading_generic": {
+    "message": "Se descarcă…"
+  },
+  "download_all_n": {
+    "message": "Descarcă toate modelele ($N$ rămase)",
+    "placeholders": {
+      "n": {
+        "content": "$1"
+      }
+    }
+  },
+  "all_downloaded": {
+    "message": "Toate modelele au fost descărcate ✓"
+  },
+  "wrong_file": {
+    "message": "⚠ fișier greșit în cache ($FILES$) — apasă Descarcă mai jos pentru a prelua cel corect",
+    "placeholders": {
+      "files": {
+        "content": "$1"
+      }
+    }
+  },
+  "downloaded_short": {
+    "message": "✓ descărcat"
+  },
+  "not_downloaded": {
+    "message": "nedescărcat"
+  },
+  "support_project": {
+    "message": "❤️ Sprijină acest proiect"
+  },
+  "support_title": {
+    "message": "Sprijină acest proiect"
+  },
+  "support_hint": {
+    "message": "Această extensie este gratuită și open source. Dacă îți economisește timp, poți sprijini dezvoltarea ei continuă."
+  },
+  "pagecache_title": {
+    "message": "Cache pentru pagini traduse"
+  },
+  "pagecache_desc": {
+    "message": "Paginile pe care le revizitezi în această sesiune de browser se încarcă instant din un cache temporar. Cache-ul este șters automat când browserul se închide."
+  },
+  "pagecache_stats": {
+    "message": "$COUNT$ imagini · $SIZE$",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      },
+      "size": {
+        "content": "$2"
+      }
+    }
+  },
+  "pagecache_clear": {
+    "message": "Golește cache-ul"
+  },
+  "pagecache_clearing": {
+    "message": "Se golește…"
+  },
+  "pagecache_cleared": {
+    "message": "Cache golit ($COUNT$ imagini, $SIZE$ eliberați)",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      },
+      "size": {
+        "content": "$2"
+      }
+    }
+  },
+  "allow_all_sites": {
+    "message": "Permite toate site-urile",
+    "description": "site access"
+  },
+  "allow_all_desc": {
+    "message": "Traduce pe orice site fără a permite mai întâi fiecare site. Acest lucru acordă extensiei acces la toate site-urile.",
+    "description": "site access"
+  },
+  "all_sites_on": {
+    "message": "toate site-urile permise ✓",
+    "description": "site access"
+  },
+  "pill_dismiss": {
+    "message": "închide",
+    "description": "Dismiss link on the error pill"
+  },
+  "pill_allow_host": {
+    "message": "Permite $HOST$",
+    "description": "Pill button: grant image-host access",
+    "placeholders": {
+      "host": {
+        "content": "$1"
+      }
+    }
+  },
+  "pill_grant_denied": {
+    "message": "acces refuzat — permite-l din fereastra popup",
+    "description": "Pill: image-host grant was denied"
+  },
+  "pill_err_page_changed": {
+    "message": "imaginea paginii s-a schimbat înainte ca traducerea să se termine — reîncarcă pagina pentru a încerca din nou",
+    "description": "Pill error: pill_err_page_changed"
+  },
+  "pill_err_render_mode": {
+    "message": "mod de redare neașteptat — reîncarcă pagina pentru a încerca din nou",
+    "description": "Pill error: pill_err_render_mode"
+  },
+  "grant_host": {
+    "message": "Acordă acces la gazdă",
+    "description": "Button to grant host permission for LM Studio server URL"
+  }
+}

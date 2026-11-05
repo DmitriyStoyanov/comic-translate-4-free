@@ -48,7 +48,7 @@ comic-translate-4-free dịch các trang manga và truyện tranh tự động k
 - **114 ngôn ngữ đích** qua Google Translate, Azure Translator, hoặc máy chủ LM Studio cục bộ của bạn.
 - **Tự động nhận diện ngôn ngữ nguồn** — tiếng Nhật, tiếng Anh, tiếng Trung giản thể/phồn thể được nhận diện tự động từ văn bản OCR.
 - **Hỗ trợ truyện dải dài / webtoon** — các trang cao được xử lý theo từng đoạn chồng lấn để chữ luôn sắc nét.
-- **16 ngôn ngữ giao diện** — giao diện tiện ích theo ngôn ngữ của trình duyệt bạn.
+- **17 ngôn ngữ giao diện** — giao diện tiện ích theo ngôn ngữ của trình duyệt bạn.
 
 ### 🔒 Quyền riêng tư
 

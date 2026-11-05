@@ -48,7 +48,7 @@ comic-translate-4-free traduce páginas de manga y cómics automáticamente mien
 - **114 idiomas de destino** con Google Translate, Azure Translator o tu propio servidor local de LM Studio.
 - **Detección automática del idioma de origen** — japonés, inglés y chino simplificado/tradicional se identifican automáticamente a partir del texto reconocido por OCR.
 - **Compatibilidad con tiras largas / webtoons** — las páginas altas se procesan en segmentos superpuestos para que el texto se mantenga nítido.
-- **16 idiomas de interfaz** — la interfaz de la extensión sigue el idioma de tu navegador.
+- **17 idiomas de interfaz** — la interfaz de la extensión sigue el idioma de tu navegador.
 
 ### 🔒 Privacidad
 

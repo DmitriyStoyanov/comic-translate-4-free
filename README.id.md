@@ -48,7 +48,7 @@ comic-translate-4-free menerjemahkan halaman manga dan komik secara otomatis saa
 - **114 bahasa target** melalui Google Translate, Azure Translator, atau server LM Studio lokal Anda sendiri.
 - **Deteksi otomatis bahasa sumber** — bahasa Jepang, Inggris, Mandarin Sederhana/Tradisional teridentifikasi secara otomatis dari teks hasil OCR.
 - **Dukungan strip panjang / webtoon** — halaman yang tinggi diproses dalam segmen yang saling tumpang tindih agar teks tetap tajam.
-- **16 bahasa UI** — antarmuka ekstensi mengikuti pengaturan bahasa browser Anda.
+- **17 bahasa UI** — antarmuka ekstensi mengikuti pengaturan bahasa browser Anda.
 
 ### 🔒 Privasi
 

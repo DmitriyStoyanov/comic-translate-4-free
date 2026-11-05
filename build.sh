@@ -24,11 +24,11 @@ LOCAL_DIR="$HOME/workspace/your_files"
 rm -rf "$DIST"
 mkdir -p "$DIST"
 
-# Locale parity (source tree, once): all 16 _locales must have identical key sets. Fail on drift.
+# Locale parity (source tree, once): all 17 _locales must have identical key sets. Fail on drift.
 python3 - <<'EOF'
 import json, glob, sys
 locales = sorted(glob.glob('_locales/*/messages.json'))
-assert len(locales) == 16, f'expected 16 locales, found {len(locales)}'
+assert len(locales) == 17, f'expected 17 locales, found {len(locales)}'
 base = set(json.load(open(locales[0])).keys())
 ok = True
 for loc in locales[1:]:
@@ -40,7 +40,7 @@ for loc in locales[1:]:
         print(f'DRIFT {loc}: missing={sorted(missing)[:5]} extra={sorted(extra)[:5]}')
 if not ok:
     sys.exit(1)
-print(f'locales OK: 16 locales, {len(base)} keys each')
+print(f'locales OK: 17 locales, {len(base)} keys each')
 EOF
 
 build_one() {
