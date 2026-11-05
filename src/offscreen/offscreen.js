@@ -36,27 +36,40 @@ ort.env.wasm.numThreads = Math.max(1, (typeof navigator !== 'undefined' && navig
 // Chrome 2.0.13: measured thread count (ML_BENCH_THREADS). The benchmark
 // runs once, in the background, after a successful run, and saves the
 // fastest count for this machine to storage.local (measuredThreads).
-// Later runs use it instead of the raw core count. Read once, before the
-// first session is created — numThreads only takes effect before session
-// creation, so ensureModel awaits this. Never throws: any failure keeps
-// the default above. The read starts at load, so it is usually done
-// before the first ensureModel.
-let threadsReadyPromise = null;
-function threadsReady() {
-  if (!threadsReadyPromise) {
-    threadsReadyPromise = (async () => {
-      try {
-        const store = (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) ? chrome.storage.local : null;
-        if (!store) return;
-        const saved = await store.get('measuredThreads');
-        const m = saved && saved.measuredThreads;
-        if (m && Number.isInteger(m.threads) && m.threads >= 1) {
-          ort.env.wasm.numThreads = m.threads;
-        }
-      } catch {}
-    })();
-  }
-  return threadsReadyPromise;
+// Later runs use it instead of the raw core count. numThreads only takes
+// effect before a session is created, so threadsReady() re-reads storage
+// on every call (inside ensureModel, at the start of a run before any
+// session is used): when a stored count differs from the one already
+// applied, it sets numThreads and drops the cached WASM sessions, so the
+// next ensureModel recreates them with the new pool. That is what makes
+// the measured count real on the next run — the old code read storage
+// once at doc load and cached it, so a bench result saved after load
+// never applied until a reload. Never throws: any failure keeps the
+// current count. The GPU worker is a separate realm and is not affected.
+// The big/small-core split is why this measurement matters at all: the
+// browser only reports the total core count, so the best count (usually
+// near the big-core count) has to be measured, not assumed.
+// (2.0.16: re-read + reset; was read-once at load.)
+let threadsApplied = Math.max(1, (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4);
+let threadsApplying = null;
+async function threadsReady() {
+  if (threadsApplying) { try { await threadsApplying; } catch {} return; }
+  threadsApplying = (async () => {
+    try {
+      const store = (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) ? chrome.storage.local : null;
+      if (!store) return;
+      const saved = await store.get('measuredThreads');
+      const m = saved && saved.measuredThreads;
+      if (m && Number.isInteger(m.threads) && m.threads >= 1 && m.threads !== threadsApplied) {
+        threadsApplied = m.threads;
+        ort.env.wasm.numThreads = m.threads;
+        // The old pool is fixed at first session creation — drop the
+        // cached sessions so they are recreated with the new count.
+        await resetGroup('*');
+      }
+    } catch {}
+  })();
+  try { await threadsApplying; } catch {} finally { threadsApplying = null; }
 }
 threadsReady();
 
@@ -92,7 +105,8 @@ function benchOneCount(threads) {
 }
 
 // Chrome 2.0.13: measure the best WASM thread count once, in the
-// background. Counts tried: 1, 2, 4, and the full core count (deduped).
+// background. Counts tried: a doubling spread up to the core count
+// (2.0.15: 10 cores -> 1,2,4,8,10; 18 cores -> 1,2,4,8,16,18).
 // Each count times 20 Baberu decoder steps in its own worker (median).
 // The winner is the smallest count within 5% of the fastest — same speed
 // for less CPU. Saved to storage.local (measuredThreads, with the core
@@ -125,6 +139,7 @@ async function runThreadBenchmark() {
     const counts = [];
     for (let n = 1; n < cores; n *= 2) counts.push(n);
     counts.push(cores);
+    benchLog('threads bench started, testing ' + counts.join(', ') + ' threads');
     const results = [];
     for (const n of counts) {
       const ms = await benchOneCount(n);
