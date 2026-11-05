@@ -49,8 +49,17 @@ function diagPush(line) {
 // 1.4.0 (m6): each run's (and each recovery's) panel log is its own.
 // Called at run start and at recovery start, before any diagPush for
 // that run/recovery, so a sent log never carries the tail of older runs.
+// EXCEPTION (2.0.17): keep 'threads bench' lines. The benchmark runs
+// after a run ends, so its lines land in the buffer AFTER that run's log
+// was already sent to the panel — wiping them here deleted the only
+// panel copy, and the numbers never appeared anywhere James looks.
+// Kept lines ride into the next run's log instead.
 function clearDiagLog() {
-  try { diagLogBuf.length = 0; } catch {}
+  try {
+    const keep = diagLogBuf.filter((l) => l.includes('threads bench'));
+    diagLogBuf.length = 0;
+    for (const l of keep) diagLogBuf.push(l);
+  } catch {}
 }
 initPageCache();
 
