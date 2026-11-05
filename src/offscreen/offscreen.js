@@ -624,7 +624,7 @@ const handlers = {
     const tileMax = providersFor('inpaint')[0] === 'webgpu' ? 1024 : TILE_MAX;
     throwIfCancelled(runId);
     const t0 = performance.now();
-    const results = new Array(patches.length);
+    const results = [];
     // MEASURE1: total LaMa tiles across all patches, by the same
     // tileOrigins math inpaintPatch uses (a patch fitting tileMax is
     // 1 tile, otherwise xs * ys). Fast-path patches still count: this
@@ -658,23 +658,18 @@ const handlers = {
     // DIAG (2.0.8): per-patch time, so one Mac run shows whether the
     // GPU tile time is one big patch, even per-tile cost, or fast-path
     // hits — the fix depends on which it is.
-    const patchStats = new Array(patches.length);
-    // DIAG-EXP (2.0.11): patches run in parallel on WebGPU (up to 4),
-    // sequential on WASM. Each patch has its own pixels and its own
-    // output key, and inpaintPatch keeps all work in locals except the
-    // shared session — so concurrent session.run calls cannot mix
-    // patches up. Whether it saves time depends on whether one LaMa
-    // run already fills the GPU: the 2.0.10 OCR test showed one Baberu
-    // crop already fills the WASM threads, so the same may hold here.
-    // WASM stays sequential for the same reason (and a WASM run blocks
-    // its thread, so parallel patches there would only interleave).
-    const PATCH_CONCURRENCY = providersFor('inpaint')[0] === 'webgpu' ? 4 : 1;
-    let nextPatch = 0;
-    const runOnePatch = async () => {
-      for (;;) {
-        const pi = nextPatch++;
-        if (pi >= patches.length) return;
-        const p = patches[pi];
+    const patchStats = [];
+    // 2.0.11 ran patches in parallel on WebGPU (up to 4) and it HUNG:
+    // the GPU worker made no progress for 120s, the watchdog fired,
+    // and the run fell back to WASM (total 148,870ms). Concurrent
+    // session.run calls on one ORT WebGPU session deadlock — the
+    // session is not reentrant. So patches run one after another (1),
+    // and 1 is the number the algorithm gives: one session, one run
+    // at a time. Real parallelism would need one session per patch,
+    // which is a different design (and each session holds its own
+    // GPU buffers), not a number to tune. Reverted in 2.0.12.
+    try {
+      for (const [pi, p] of patches.entries()) {
         throwIfCancelled(runId);
         const pT0 = performance.now();
         const rgbaRaw = await pixelPeek(p.key);
@@ -738,17 +733,12 @@ const handlers = {
         }
         const resKey = p.key + ':out' + outSuffix;
         await pixelPut(resKey, out.buffer);
-        results[pi] = { id: p.id, key: resKey, width: p.width, height: p.height };
+        results.push({ id: p.id, key: resKey, width: p.width, height: p.height });
         let pTiles = 0;
         try { pTiles = tileOrigins(p.width, tileMax).length * tileOrigins(p.height, tileMax).length; } catch { pTiles = 0; }
-        patchStats[pi] = { id: p.id, w: p.width, h: p.height, tiles: pTiles, fast: !!bgFill, ms: Math.round(performance.now() - pT0) };
+        patchStats.push({ id: p.id, w: p.width, h: p.height, tiles: pTiles, fast: !!bgFill, ms: Math.round(performance.now() - pT0) });
         reportInpaint(pi, 1);
       }
-    };
-    try {
-      const workers = [];
-      for (let w = 0; w < Math.min(PATCH_CONCURRENCY, patches.length); w++) workers.push(runOnePatch());
-      await Promise.all(workers);
     } finally {
       releaseRun(runId);
     }
