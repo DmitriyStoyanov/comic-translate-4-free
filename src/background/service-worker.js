@@ -1679,10 +1679,24 @@ async function runPipeline(tabId, opts = {}) {
   // Chrome 2.0.13: after a successful run, measure the best WASM thread
   // count once, in the background (ML_BENCH_THREADS). Fire-and-forget —
   // the run never waits for it, and a failure changes nothing.
+  // 2.0.25: gate the trigger here too. The offscreen doc also skips when
+  // it sees a complete save, but in 2.0.24 the bench re-measured after
+  // every run, so check in the service worker as well — if a complete
+  // full-chain result is already saved for this machine, do not send the
+  // trigger at all. Fail open: any error or missing value still sends it.
   if (result && result.ok) {
     try {
-      const p = chrome.runtime.sendMessage({ type: MSG.ML_BENCH_THREADS });
-      if (p && p.catch) p.catch(() => {});
+      let alreadyMeasured = false;
+      try {
+        const saved = await chrome.storage.local.get('measuredThreads');
+        const m = saved && saved.measuredThreads;
+        const cores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
+        if (m && m.method === 'full-chain' && m.hardwareConcurrency === cores && Number.isInteger(m.threads)) alreadyMeasured = true;
+      } catch {}
+      if (!alreadyMeasured) {
+        const p = chrome.runtime.sendMessage({ type: MSG.ML_BENCH_THREADS });
+        if (p && p.catch) p.catch(() => {});
+      }
     } catch {}
   }
   return result;

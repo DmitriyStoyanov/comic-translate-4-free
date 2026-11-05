@@ -57,4 +57,4 @@ jobs:
           done
           gh release upload Firefox "$ZIP" --clobber
           NOTES=$(printf 'Latest Firefox build: v%s.\n\nThis tag always points to the newest Firefox release. The zip here is the current Firefox build.' "$VERSION")
-          gh release edit Firefox --title "Firefox" --notes "$NOTES"
+          gh release edit Firefox --title "Firefox v$VERSION" --notes "$NOTES"

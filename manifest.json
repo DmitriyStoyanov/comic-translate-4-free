@@ -1,9 +1,9 @@
 {
   "action": {
     "default_icon": {
-      "128": "icons/icon128.png",
       "16": "icons/icon16.png",
-      "48": "icons/icon48.png"
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
     },
     "default_popup": "src/ui/popup.html"
   },
@@ -25,9 +25,9 @@
     "http://127.0.0.1/*"
   ],
   "icons": {
-    "128": "icons/icon128.png",
     "16": "icons/icon16.png",
-    "48": "icons/icon48.png"
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
   },
   "manifest_version": 3,
   "name": "__MSG_appName__",
@@ -45,6 +45,6 @@
     "alarms",
     "contextMenus"
   ],
-  "version": "2.0.24",
+  "version": "2.0.25",
   "default_locale": "en"
 }

@@ -57,4 +57,4 @@ jobs:
           done
           gh release upload Chrome "$ZIP" --clobber
           NOTES=$(printf 'Latest Chrome build: v%s.\n\nThis tag always points to the newest Chrome release. The zip here is the current Chrome build.' "$VERSION")
-          gh release edit Chrome --title "Chrome" --notes "$NOTES"
+          gh release edit Chrome --title "Chrome v$VERSION" --notes "$NOTES"

@@ -241,6 +241,10 @@ async function runThreadBenchmark() {
         benchLog('threads bench skipped: already measured ' + m.threads + ' threads');
         return;
       }
+      // 2.0.25: diagnostic — the bench re-measured after every run in
+      // 2.0.24 even though a complete save existed. Log what was read so
+      // the next run proves whether the skip sees the save.
+      benchLog('threads bench read storage: ' + (m ? 'method=' + (m.method || 'none') + ' threads=' + (m.threads === undefined ? 'none' : m.threads) + ' timings=' + (m.timings ? Object.keys(m.timings).length : 0) : 'nothing saved'));
       if (m && m.method === 'full-chain' && m.hardwareConcurrency === cores && m.timings && typeof m.timings === 'object') {
         for (const n of counts) {
           const t = m.timings[n];
@@ -272,7 +276,15 @@ async function runThreadBenchmark() {
         benchLog('threads bench ' + n + ' threads: vision ' + Math.round(r.visionMs) + 'ms prefill ' + Math.round(r.prefillMs) + 'ms step ' + Math.round(r.stepMs * 10) / 10 + 'ms/step total ' + Math.round(r.totalMs) + 'ms/crop');
         // Save after EVERY count — a cancel/freeze loses at most the
         // in-flight count, never the ones already measured.
-        try { await saveMeasuredThreads({ method: 'full-chain', timings, hardwareConcurrency: cores, measuredAt: new Date().toISOString(), partial: true }); } catch {}
+        // 2.0.25: preserve the saved winner. A partial must never
+        // overwrite a complete result and destroy its threads — that
+        // left storage with no winner, so the next run could not apply
+        // the measured count and the next bench could not skip.
+        try {
+          const prev = await readMeasuredThreads().catch(() => null);
+          const keep = (prev && Number.isInteger(prev.threads)) ? { threads: prev.threads } : {};
+          await saveMeasuredThreads({ ...keep, method: 'full-chain', timings, hardwareConcurrency: cores, measuredAt: new Date().toISOString(), partial: true });
+        } catch {}
       } else if (r && r.error) {
         benchLog('threads bench ' + n + ' threads: failed: ' + String(r.error).slice(0, 120));
       } else {
