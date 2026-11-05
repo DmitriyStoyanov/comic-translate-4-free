@@ -877,6 +877,10 @@ async function runPipeline(tabId, opts = {}) {
         + ' crossOriginIsolated ' + (d && d.crossOriginIsolated != null ? String(d.crossOriginIsolated) : 'unknown')
         + ' hardwareConcurrency ' + (d && d.hardwareConcurrency != null ? d.hardwareConcurrency : 'unknown')
         + ' numThreads ' + (d && d.numThreads != null ? d.numThreads : 'unknown'));
+      // First-startup detection, ML-realm number: if onInstalled missed
+      // it (or the SW number differed), this first run saves it. Only
+      // saves when missing or changed, never blocks the run.
+      saveDetectedCores(d && d.hardwareConcurrency, 'thread-info');
     } catch (e) {
       diagPush('thread-info failed: ' + String((e && e.message) || e).slice(0, 120));
     }
@@ -1631,8 +1635,32 @@ chrome.tabs.onRemoved.addListener(tabId => autoFired.delete(tabId));
 // Consumed by the popup on first open after the install/update; opening
 // the popup is what triggers the lead, so it waits if the user never
 // opens it.
+// Silent first-startup core detection (Chrome 2.0.2, no UI).
+// Detects navigator.hardwareConcurrency once and saves it to
+// storage.local as detectedCores { cores, detectedAt, source }.
+// Saved only when missing or when the live number differs (machine
+// changed). Never throws, never blocks install or a run, never shows
+// UI. Thread calculation itself stays live in offscreen.js (min(10,
+// hardwareConcurrency) on Chrome, 1 on Firefox without SAB); this
+// record is the first-startup detection, and the debug-panel diag
+// line below is how it is verified (debug on, first run).
+async function saveDetectedCores(cores, source) {
+  try {
+    if (!cores || typeof cores !== 'number' || cores < 1) return;
+    const got = await chrome.storage.local.get(['detectedCores']);
+    const prev = got && got.detectedCores;
+    if (prev && prev.cores === cores) return;
+    await chrome.storage.local.set({ detectedCores: { cores, detectedAt: new Date().toISOString(), source } });
+    diagPush('detected cores ' + cores + ' saved (' + source + ')');
+  } catch { /* silent, never fails install or a run */ }
+}
+
 chrome.runtime.onInstalled.addListener(details => {
   if (!details || (details.reason !== 'install' && details.reason !== 'update')) return;
+  // Run before the early returns below: a code-only update changes no
+  // models, so the existing handler returns early for it — core
+  // detection must still run on that first startup after the update.
+  saveDetectedCores((typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || null, 'onInstalled');
   chrome.storage.local.get(['settings', 'modelFingerprint']).then(({ settings, modelFingerprint: stored }) => {
     const current = computeModelFingerprint();
     const modelsChanged = stored !== current;
