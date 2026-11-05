@@ -1073,6 +1073,9 @@ async function runPipeline(tabId, opts = {}) {
     checkCancelled(runId);
     setProgress(runId, 'ocr', 0.38);
     {
+      // DIAG (2.0.9): prep = crop building + pixelPut (SW side, invisible
+      // in r.ms); call = the ML round trip; load rides on r.loadMs.
+      const ocrPrepT0 = performance.now();
       const crops = [];
       for (const [i, b] of blocks.entries()) {
         const c = cropForBlock(rgba, w, h, b.xyxy, b.bubble_xyxy);
@@ -1082,21 +1085,40 @@ async function runPipeline(tabId, opts = {}) {
         await pixelPut(pxKey, c.data.buffer);
         crops.push({ id: i, key: pxKey, data: c.data, width: c.w, height: c.h, x: c.x, y: c.y, bw: b.xyxy[2] - b.xyxy[0], bh: b.xyxy[3] - b.xyxy[1] });
       }
-      let ocrMs = 0, ocrEngineLabel = '';
+      const ocrPrepMs = Math.round(performance.now() - ocrPrepT0);
+      let ocrMs = 0, ocrEngineLabel = '', ocrCallMs = 0;
       // Per-crop OCR diagnostics for the debug panel: char count and whether
       // this crop needed the Baberu chunked re-OCR (v1.1: >256 chars, rare).
       const ocrStats = new Map();
       if (crops.length) {
+        const ocrCallT0 = performance.now();
         const r = await callMlChecked(runId, {
           type: MSG.ML_OCR, runId, sourceLang: settings.sourceLang,
           crops: crops.map(({ id, key, width, height }) => ({ id, key, width, height })),
         });
+        ocrCallMs = Math.round(performance.now() - ocrCallT0);
         ocrMs = r.ms;
         ocrEngineLabel = (MODEL_GROUPS.find(g => g.id === r.engine) || {}).label || r.engine || '';
         for (const res of r.results) {
           blocks[res.id].text = res.text;
           ocrStats.set(res.id, { chars: res.chars, chunks: res.chunks, hitCeiling: res.hitCeiling, stopped: res.stopped, skipped: !!res.skipped });
         }
+        // DIAG (2.0.9): OCR split + slowest crops, so one Mac run shows
+        // whether OCR time is one long crop, even per-crop cost, or the
+        // Baberu load — the fix depends on which it is.
+        diagPush('ocr split ms prep ' + ocrPrepMs + ' load ' + ((r && r.loadMs) || 0) + ' run ' + ocrMs + ' call ' + ocrCallMs);
+        const cropById = new Map(crops.map(c => [c.id, c]));
+        let ocrChars = 0, ocrSkipped = 0;
+        const ocrSlow = [];
+        for (const res of r.results) {
+          ocrChars += res.chars || 0;
+          if (res.skipped) ocrSkipped++;
+          const cc = cropById.get(res.id);
+          ocrSlow.push({ id: res.id, w: cc ? cc.width : 0, h: cc ? cc.height : 0, chars: res.chars || 0, chunks: res.chunks || 0, skipped: !!res.skipped, ms: res.ms || 0 });
+        }
+        ocrSlow.sort((a, b) => b.ms - a.ms);
+        diagPush('ocr crops ' + r.results.length + ' skipped ' + ocrSkipped + ' chars ' + ocrChars);
+        for (const s of ocrSlow.slice(0, 5)) diagPush('ocr slow crop ' + s.id + ' ' + s.w + 'x' + s.h + ' chars ' + s.chars + ' chunks ' + s.chunks + ' skipped ' + (s.skipped ? 'yes' : 'no') + ' ms ' + s.ms);
       }
       timings.ocr = ocrMs;
       setProgress(runId, 'ocr', 0.55);

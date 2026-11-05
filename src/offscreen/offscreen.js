@@ -504,7 +504,12 @@ const handlers = {
     throwIfCancelled(runId);
     // OCR engine follows the source language — all languages use Baberu.
     const engine = ocrEngineForLang(sourceLang || 'ja');
+    // DIAG (2.0.9): time the model load separately — it runs before t0
+    // and is invisible in r.ms, so the SW split can tell load from run
+    // (same as inpaint loadMs in 2.0.5).
+    const loadT0 = performance.now();
     await ensureModel(engine);
+    const loadMs = Math.round(performance.now() - loadT0);
     throwIfCancelled(runId);
     const t0 = performance.now();
     const results = [];
@@ -526,13 +531,16 @@ const handlers = {
     try {
       for (const c of crops) {
         throwIfCancelled(runId);
+        // DIAG (2.0.9): per-crop ms — Baberu is autoregressive, so time
+        // grows with output tokens; one long crop can dominate the stage.
+        const cT0 = performance.now();
         const raw = await pixelPeek(c.key);
         const u8 = new Uint8ClampedArray(raw);
         // Skip the model on blank crops: ~1ms variance check vs ~1s of
         // vision+prefill+autoregressive steps. Empty text flows downstream
         // exactly as if OCR had returned ''.
         if (cropStddev(u8) < 3.0) {
-          results.push({ id: c.id, text: '', chars: 0, chunks: 0, hitCeiling: false, stopped: 'eos', skipped: true });
+          results.push({ id: c.id, text: '', chars: 0, chunks: 0, hitCeiling: false, stopped: 'eos', skipped: true, ms: Math.round(performance.now() - cT0) });
           continue;
         }
         // Baberu v1.1 reads up to ~256 chars; the chunked path is a rare
@@ -558,7 +566,7 @@ const handlers = {
             shouldAbort: () => cancelledRuns.has(runId),
           });
         }
-        results.push({ id: c.id, text: r.text, chars: r.text.length, chunks: r.chunks, hitCeiling: r.hitCeiling, stopped: r.stopped });
+        results.push({ id: c.id, text: r.text, chars: r.text.length, chunks: r.chunks, hitCeiling: r.hitCeiling, stopped: r.stopped, ms: Math.round(performance.now() - cT0) });
       }
     } finally {
       releaseRun(runId);
@@ -566,7 +574,7 @@ const handlers = {
     // Guard against late completion after timeout/cancel: don't deliver
     // stale results if the run was cancelled while we were working.
     throwIfCancelled(runId);
-    return { ok: true, results, ms: Math.round(performance.now() - t0), engine };
+    return { ok: true, results, ms: Math.round(performance.now() - t0), engine, loadMs };
   },
 
   // MEASURE1 diagnostic: report the WASM thread facts of the realm
