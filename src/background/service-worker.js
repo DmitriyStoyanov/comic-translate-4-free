@@ -6,7 +6,8 @@ import { MODEL_GROUPS, getModelStatus, deleteModelGroup, computeModelFingerprint
 import { getSettings } from '../shared/settings.js';
 import {
   makeTextBlock, mergeOverlappingBoxes, sortBlocks,
-  boxIoU, clampBox, dedupAndMergeSeams, mergePaddedBoxes,
+  boxIoU, clampBox, dedupAndMergeSeams, mergeBoxesByCost,
+  INPAINT_COST, TILE_MAX,
 } from '../shared/textblock.js';
 import { toGrayU8, meanBrightness, renderScale, resizeBilinearRGBA } from '../shared/image-ops.js';
 import { pixelPut, pixelTake, pixelDrop, pixelPruneRun } from '../shared/pixel-bus.js';
@@ -1243,7 +1244,16 @@ async function runPipeline(tabId, opts = {}) {
       // r from the ML handler; the rest is timed here.
       let inpaintPath = 'wasm';
       let prepMs = 0, callMs = 0, pasteMs = 0, splitLoadMs = 0, splitReadyMs = null, splitTileMax = 0;
-      const patchBoxes = mergePaddedBoxes(entries, 8, w, h);
+      const { boxes: patchBoxes, predictedMs } = mergeBoxesByCost(entries, {
+        // 2.0.14: cost-based merge (see textblock.js) — merge only when
+        // the merged patch is predicted cheaper than the two apart.
+        // Expected path: Chrome tries GPU first (tileMax 1024); Firefox
+        // is WASM 1-thread (tileMax 512). A Chrome GPU failure falls back
+        // to WASM on these same patches, as before.
+        tileMax: directHandlers() ? TILE_MAX : 1024,
+        ...(directHandlers() ? INPAINT_COST.wasm1 : INPAINT_COST.gpu),
+      });
+      diagPush('inpaint merge cost: ' + entries.length + ' boxes -> ' + patchBoxes.length + ' patches, predicted ' + Math.round(predictedMs) + 'ms');
       const patches = [];
       for (const [i, pb] of patchBoxes.entries()) {
         checkCancelled(runId);

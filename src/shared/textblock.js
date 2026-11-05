@@ -188,31 +188,100 @@ export function dedupAndMergeSeams(boxes, seams, vertical) {
   return merged;
 }
 
-// Merge padded inpaint boxes: expand entries by `pad` px, clamp to image,
-// then merge overlapping boxes. Used to batch inpaint patches.
-export function mergePaddedBoxes(entries, pad, imgW, imgH) {
-  // entries: [{bounds:[x1,y1,x2,y2]}]
-  let boxes = entries.map(e => {
-    const [x1, y1, x2, y2] = e.bounds;
-    return [
-      Math.max(0, x1 - pad), Math.max(0, y1 - pad),
-      Math.min(imgW, x2 + pad), Math.min(imgH, y2 + pad),
-    ];
-  });
+// ---- Inpaint tiling + cost model (2.0.14) ---------------------------------
+// Tiling moved here from offscreen/ml/inpaint.js so the service worker
+// (which merges patches before any ML runs) and the ML host share one
+// tiling. TILE_MAX is 512, not 1024: a tile's WASM run is synchronous,
+// and on Firefox it blocks the main thread — while it runs, no timer can
+// fire and no progress updates, so a slow 1024 tile looked like a silent
+// hang. That cap is for WASM only. A WebGPU run is async, so the handler
+// passes tileMax 1024 when the provider is webgpu (2.0.10).
+export const TILE_MAX = 512;
+export const TILE_OVERLAP = 128;
+
+// Tile origins/sizes covering [0, len): first tile starts at 0, last ends at
+// len, neighbours overlap by >= TILE_OVERLAP, no tile exceeds tileMax.
+export function tileOrigins(len, tileMax = TILE_MAX) {
+  if (len <= tileMax) return [{ o: 0, n: len }];
+  const step = tileMax - TILE_OVERLAP;
+  const count = Math.ceil((len - TILE_OVERLAP) / step);
+  const tiles = [];
+  for (let i = 0; i < count; i++) {
+    const o = Math.round(i * (len - tileMax) / (count - 1));
+    tiles.push({ o, n: Math.min(tileMax, len - o) });
+  }
+  return tiles;
+}
+
+// Cost model for one LaMa tile run, fitted from James's runs on the
+// standard test page (2.0.9/2.0.10): time(tile) = fixedMs + perPxMs * area.
+// The fixed part is per-run overhead (copy tile+mask to the GPU, set the
+// run up, copy the result back) — not model warm-up, which happens once.
+// perPxMs rises with tile size (big tiles cost more per pixel than small
+// ones: 0.0022 at <=100k px, 0.0029 at ~700k px on GPU), so the merge
+// below charges the union at perPxMs * SPREAD. The spread is the measured
+// GPU ratio, big-tile k / small-tile k (0.002855/0.002189 = 1.304).
+//   gpu:   Chrome WebGPU, tileMax 1024. Fitted from 4 points (3 one-tile
+//          patches + the 8-tile big patch at 512); fits within ~5%.
+//   wasm:  Chrome WASM, 10 threads, tileMax 512. Fitted from the 2.0.11
+//          GPU-hang fallback run (patch 1 20,888ms + the other 3 patches
+//          2,700ms). Two points only — rough.
+//   wasm1: Firefox WASM, 1 thread, tileMax 512. Fixed cost taken from the
+//          Chrome WASM fit; per-pixel cost solved from the ~80s Firefox
+//          inpaint total on the same page (11 tiles, 2,266,187 computed
+//          px). Very rough — but the direction (much slower per pixel
+//          than 10-thread WASM) is certain.
+export const INPAINT_COST = {
+  gpu: { fixedMs: 123, perPxMs: 0.002189 },
+  wasm: { fixedMs: 432, perPxMs: 0.008314 },
+  wasm1: { fixedMs: 432, perPxMs: 0.0332 },
+};
+export const INPAINT_COST_SPREAD = 1.3;
+
+// Predicted ms for one patch (w x h) at the given tile size: sum over its
+// tiles of (fixedMs + perPxMs * tile area). Same tiling the pipeline uses.
+export function patchCostMs(w, h, tileMax, fixedMs, perPxMs) {
+  const xs = tileOrigins(w, tileMax), ys = tileOrigins(h, tileMax);
+  let ms = 0;
+  for (const x of xs) for (const y of ys) ms += fixedMs + perPxMs * x.n * y.n;
+  return ms;
+}
+
+// Cost-based merge (2.0.14, replaces mergePaddedBoxes): merge two boxes
+// only when the merged patch is predicted cheaper than the two apart.
+// Greedy: repeatedly merge the pair with the largest saving, stop when no
+// pair saves. The split cost uses perPxMs; the union cost uses
+// perPxMs * spread, so a merge must win even charged at the worst observed
+// per-pixel rate — when the model is unsure, boxes stay separate. That is
+// the never-worse rule: close/overlapping boxes merge (the union adds
+// almost no area, so the saved fixed cost wins); distant boxes never do
+// (the gap area costs more than the saved fixed cost). No distance number,
+// no tuned threshold — the threshold comes from the cost model.
+// Returns { boxes: [[x1,y1,x2,y2], ...], predictedMs } (predictedMs is the
+// sum of patchCostMs at perPxMs for the final boxes).
+export function mergeBoxesByCost(entries, { tileMax, fixedMs, perPxMs, spread = INPAINT_COST_SPREAD }) {
+  const boxes = entries.map((e) => e.bounds.slice());
+  const cost = (b, k) => patchCostMs(b[2] - b[0], b[3] - b[1], tileMax, fixedMs, k);
   let changed = true;
-  while (changed) {
+  while (changed && boxes.length > 1) {
     changed = false;
-    outer: for (let i = 0; i < boxes.length; i++) {
+    let bestI = -1, bestJ = -1, bestSaving = 0;
+    for (let i = 0; i < boxes.length; i++) {
       for (let j = i + 1; j < boxes.length; j++) {
         const a = boxes[i], b = boxes[j];
-        if (a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]) {
-          boxes[i] = [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[2], b[2]), Math.max(a[3], b[3])];
-          boxes.splice(j, 1);
-          changed = true;
-          break outer;
-        }
+        const u = [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[2], b[2]), Math.max(a[3], b[3])];
+        const saving = cost(a, perPxMs) + cost(b, perPxMs) - cost(u, perPxMs * spread);
+        if (saving > bestSaving) { bestSaving = saving; bestI = i; bestJ = j; }
       }
     }
+    if (bestI >= 0) {
+      const a = boxes[bestI], b = boxes[bestJ];
+      boxes[bestI] = [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[2], b[2]), Math.max(a[3], b[3])];
+      boxes.splice(bestJ, 1);
+      changed = true;
+    }
   }
-  return boxes;
+  let predictedMs = 0;
+  for (const b of boxes) predictedMs += cost(b, perPxMs);
+  return { boxes, predictedMs };
 }

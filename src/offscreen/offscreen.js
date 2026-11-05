@@ -8,7 +8,8 @@ import { ALL_FILES, downloadFileToIdb, readChunked, ocrEngineForLang, BABERU_VOC
 import { Detector } from './ml/detector.js';
 import { BaberuOCR } from './ml/baberu.js';
 import { meanBrightness } from '../shared/image-ops.js';
-import { Inpainter, tileOrigins, TILE_MAX } from './ml/inpaint.js';
+import { Inpainter } from './ml/inpaint.js';
+import { tileOrigins, TILE_MAX } from '../shared/textblock.js';
 import { pixelPut, pixelPeek } from '../shared/pixel-bus.js';
 
 // Worker-safe: a Firefox inpaint worker imports this module, and a worker

@@ -6,6 +6,7 @@
 // Patch dims must be multiples of 8. All graph ops are WASM-safe
 // (FFC is compiled to Cos/Sin/MatMul; no DFT op in the graph).
 import { toNCHW, padToMod } from '../../shared/image-ops.js';
+import { tileOrigins, TILE_MAX, TILE_OVERLAP } from '../../shared/textblock.js';
 
 // Tiled inpainting: LaMa's peak WASM memory scales with patch area, and a
 // dense page can merge its text boxes into one huge patch. On Firefox the
@@ -23,22 +24,8 @@ import { toNCHW, padToMod } from '../../shared/image-ops.js';
 // That cap is for WASM only. A WebGPU run is async, so the handler passes
 // tileMax 1024 when the provider is webgpu (2.0.10): fewer tiles, less
 // overlap waste, fewer per-run overheads. WASM keeps 512.
-export const TILE_MAX = 512;
-const TILE_OVERLAP = 128;
-
-// Tile origins/sizes covering [0, len): first tile starts at 0, last ends at
-// len, neighbours overlap by >= TILE_OVERLAP, no tile exceeds tileMax.
-export function tileOrigins(len, tileMax = TILE_MAX) {
-  if (len <= tileMax) return [{ o: 0, n: len }];
-  const step = tileMax - TILE_OVERLAP;
-  const count = Math.ceil((len - TILE_OVERLAP) / step);
-  const tiles = [];
-  for (let i = 0; i < count; i++) {
-    const o = Math.round(i * (len - tileMax) / (count - 1));
-    tiles.push({ o, n: Math.min(tileMax, len - o) });
-  }
-  return tiles;
-}
+// (TILE_MAX, TILE_OVERLAP and tileOrigins live in shared/textblock.js —
+// the service worker shares the tiling for the cost-based merge.)
 
 function cropRGBA(rgba, w, x, y, cw, ch) {
   const out = new Uint8ClampedArray(cw * ch * 4);
