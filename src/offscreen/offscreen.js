@@ -20,12 +20,14 @@ try {
 } catch {
   ort.env.wasm.wasmPaths = new URL('../offscreen/vendor/', self.location.href).href;
 }
-// WASM threads ON (up to 8 cores). Correction to the 1.2.10 note: 1.2.8
-// (threads on, full-res inpaint) works — threads are proven safe. 1.2.9
-// stalled because of half-res inpaint, not threads, so threads are back
-// and half-res is removed (see inpaint.js). Set before any session is
-// created (ensureModel below).
-ort.env.wasm.numThreads = Math.max(1, Math.min(8, (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4));
+// WASM threads ON (up to 10 cores, Chrome 2.0.1). Correction to the
+// 1.2.10 note: 1.2.8 (threads on, full-res inpaint) works — threads are
+// proven safe. 1.2.9 stalled because of half-res inpaint, not threads,
+// so threads are back and half-res is removed (see inpaint.js). Set
+// before any session is created (ensureModel below). Firefox is
+// unaffected in practice: SharedArrayBuffer is off there, so ORT still
+// runs single-threaded (thread-info numThreads 1) regardless of this cap.
+ort.env.wasm.numThreads = Math.max(1, Math.min(10, (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4));
 
 const detector = new Detector();
 const baberu = new BaberuOCR();
