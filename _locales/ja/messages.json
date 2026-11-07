@@ -165,6 +165,9 @@
   "model_inpaint": {
     "message": "LaMaインペインター（マンガ用）"
   },
+  "model_ppocr_latin": {
+    "message": "PP-OCRv6 欧文OCR（イタリア語＋ドイツ語＋フランス語＋スペイン語＋ポルトガル語＋オランダ語＋デンマーク語＋ノルウェー語）"
+  },
   "models": {
     "message": "モデル"
   },

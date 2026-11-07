@@ -16,7 +16,16 @@ export function makeTextBlock(o = {}) {
     direction: o.direction || 'horizontal', // or 'vertical'
     min_font_size: o.min_font_size || 0,
     max_font_size: o.max_font_size || 0,
-    alignment: o.alignment || 'center',
+    alignment: o.alignment || 'center', // 'left' | 'center' | 'right' | 'justify'
+    font_family: o.font_family || 'sans', // 'sans' | 'serif' (estimated from source)
+    font_weight: o.font_weight || 'normal', // 'normal' | 'bold' (estimated from source)
+    stroke_color: o.stroke_color || null,   // outline/halo color of the source text
+    src_lines: o.src_lines || 0,
+    text_lines: o.text_lines || null,   // OCR line readings (page order), used when list_like
+    list_like: !!o.list_like,           // ragged left-aligned entries: translate/draw per line
+    src_bands: o.src_bands || null,     // display lettering lines [{xyxy,color,caps,nwords}] (page coords); title blocks
+    src_line_boxes: o.src_line_boxes || null, // source text-line boxes of a left-aligned column (page coords)
+    src_indents: o.src_indents || null, // [{y1,y2,x}] lines of the source indented around artwork (page coords)
     line_spacing: o.line_spacing || 1,
     render_xyxy: o.render_xyxy || null, // computed render area (stage 7)
     render_font_size: o.render_font_size || 0,

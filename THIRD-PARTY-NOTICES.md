@@ -56,6 +56,21 @@ Ported files in this repository:
 Changes vs. upstream: rewritten from Python/NumPy to JavaScript, adapted to
 ONNX Runtime Web tensors.
 
+### PaddlePaddle/PaddleOCR — Apache License 2.0
+https://github.com/PaddleOCR/PaddleOCR — © PaddlePaddle contributors.
+
+Ported files in this repository:
+- `src/offscreen/ml/ppocr.js` — PP-OCRv5/v6 recognition inference preprocessing
+  (RecResizeImg + NormalizeImage) and CTC greedy decode (CTCLabelDecode,
+  including the `use_space_char` trailing-space class), verified against
+  PaddlePaddle's official PP-OCRv5 inference config; the line splitting for
+  multi-line crops, the diacritic-box merge, and the light-on-dark polarity
+  normalization are this repo's own code (shared/image-ops components +
+  vertical-overlap grouping), not upstream.
+
+Changes vs. upstream: rewritten from Python to JavaScript, adapted to
+ONNX Runtime Web tensors; no detection model (crops come from our detector).
+
 ### jameslee0623/ComicTranslate — author's own project
 - `src/background/translators.js` — LM Studio reply parsing ported from
   `lensLocalEngine.js` in the author's own public repository
@@ -75,6 +90,8 @@ files, a few KB to ~130 KB). Their licenses belong to their publishers:
 | Manga inpainter (`lama-manga-dynamic.onnx`) | `ogkalu/lama-manga-onnx-dynamic` — ONNX export of dreMaz/AnimeMangaInpainting | **Apache-2.0** (license tag on the model card); upstream dreMaz/AnimeMangaInpainting card is **MIT**-tagged (lineage: advimman/lama, Apache-2.0) |
 | Baberu OCR (`vision_int4.onnx`, `decoder_prefill_int8.onnx`, `decoder_step_int8.onnx`) — Japanese, English, Simplified/Traditional Chinese | `genshiai-daichi/baberu-ocr` — manga-bubble-trained character OCR | **Apache-2.0** (license tag on the model card; LICENSE file in the repo) |
 | Baberu character vocab (`src/offscreen/ml/dicts/baberu-vocab.json`, bundled) | `tokenizer/vocab.json` from `genshiai-daichi/baberu-ocr` | **Apache-2.0** |
+| Latin OCR (`inference.onnx`, used when the source language is Italian, German, French, Spanish, Portuguese, Dutch, Danish, or Norwegian) | `PaddlePaddle/PP-OCRv6_small_rec_onnx` — official ONNX export of PP-OCRv6 small rec | **Apache-2.0** (PaddlePaddle/PaddleOCR) |
+| PP-OCR latin dict (`src/offscreen/ml/dicts/ppocr-latin.txt`, bundled) | `languages/latin/dict.txt` shipped with the matching `rec.onnx` in `monkt/paddleocr-onnx` (**Apache-2.0**; byte-identical to the repo's dict on 2026-11-07) | **Apache-2.0** |
 
 ## 4. Not used / not shipped
 
@@ -118,7 +135,7 @@ SOFTWARE.
 
 ---
 
-## 6. Apache License 2.0 (comic-translate, baberu-ocr, RT-DETRv2, LaMa)
+## 6. Apache License 2.0 (comic-translate, baberu-ocr, RT-DETRv2, LaMa, PaddleOCR)
 
                                  Apache License
                            Version 2.0, January 2004
@@ -321,3 +338,19 @@ SOFTWARE.
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+
+
+---
+
+## Bundled render fonts (fonts/*.woff2)
+
+Used only to draw the translated text onto the image (served by the service
+worker, loaded by the content script as "CT Sans" / "CT Serif").
+
+- **Noto Sans** and **Noto Serif**, regular (400) and bold (700), Latin / Latin-Extended /
+  Cyrillic / Cyrillic-Extended / Vietnamese subsets. Copyright 2022 The Noto Project
+  Authors (https://github.com/notofonts/latin-greek-cyrillic). Licensed under the
+  SIL Open Font License, Version 1.1 (full text: `fonts/LICENSE-NotoSans-OFL.txt`,
+  `fonts/LICENSE-NotoSerif-OFL.txt`). Subsets via the `@fontsource/noto-sans` and
+  `@fontsource/noto-serif` packages (same license). The fonts are unmodified and are
+  not sold on their own.

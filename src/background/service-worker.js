@@ -11,9 +11,10 @@ import {
 } from '../shared/textblock.js';
 import { toGrayU8, meanBrightness, renderScale, resizeBilinearRGBA } from '../shared/image-ops.js';
 import { pixelPut, pixelTake, pixelDrop, pixelPruneRun } from '../shared/pixel-bus.js';
-import { generateMask } from '../shared/mask.js';
+import { generateMask, flatFillMasked } from '../shared/mask.js';
 import { translateBlocks, checkAzure, checkLmStudio, BACKEND_LABEL, BACKEND_SHORT_LABEL } from './translators.js';
 import { detectPageLang } from '../shared/lang-detect.js';
+import { estimateBlockStyle, refineTitleBand } from '../shared/style.js';
 import { mlHostAlive, ensureMlHost, callMl, cancelMlForRun, runPooledInpaint, cancelPooledInpaint, largestPatchAreaShare, runGpuInpaint, cancelGpuInpaint, runChromeGpuInpaint, cancelChromeGpuInpaint, notifyChromeGpuProgress, makeCanvas, canvasToBlob, directHandlers, WEBP_TYPE, WEBP_QUALITY, setMlAlarmRecoveryHook } from './ml-bridge.js';
 import {
   initPageCache, buildCacheKey, buildCacheKeyTier1, buildCacheKeyTier2,
@@ -510,10 +511,36 @@ function cropForBlock(rgba, pw, ph, xyxy, bubbleXyxy) {
 }
 
 // ---------------------------------------------------------------- blocks
+// A big free-text box (e.g. a magazine title) can fully contain a smaller one
+// (the byline above it); both then get OCR'd and translated, and the big
+// crop's text reads as junk. When the small box sits at the top or bottom edge
+// of the big one, trim the big box so they no longer overlap; otherwise the
+// contained box is dropped (the big box's OCR already covers it).
+function splitContainedBoxes(boxes) {
+  const out = boxes.map(b => b.slice());
+  const drop = new Set();
+  const area = b => Math.max(0, b[2] - b[0]) * Math.max(0, b[3] - b[1]);
+  for (let i = 0; i < out.length; i++) {
+    for (let j = 0; j < out.length; j++) {
+      if (i === j || drop.has(i) || drop.has(j)) continue;
+      const A = out[i], B = out[j];
+      if (area(B) >= area(A)) continue;
+      const ix = Math.max(0, Math.min(A[2], B[2]) - Math.max(A[0], B[0]));
+      const iy = Math.max(0, Math.min(A[3], B[3]) - Math.max(A[1], B[1]));
+      if (ix * iy < 0.9 * area(B)) continue;
+      const ah = A[3] - A[1];
+      if (B[1] - A[1] < 0.2 * ah && B[3] < A[3] - 0.2 * ah) A[1] = B[3];
+      else if (A[3] - B[3] < 0.2 * ah && B[1] > A[1] + 0.2 * ah) A[3] = B[1];
+      else drop.add(j);
+    }
+  }
+  return out.filter((_, i) => !drop.has(i));
+}
+
 function buildBlocks(detections, w, h, rgba, settings) {
   const bubbles = detections.filter(d => d.label === 0).map(d => d.xyxy);
   const textBoxes = detections.filter(d => d.label !== 0).map(d => d.xyxy);
-  const merged = mergeOverlappingBoxes(textBoxes, 0.3);
+  const merged = splitContainedBoxes(mergeOverlappingBoxes(textBoxes, 0.3));
   const blocks = merged.map(xyxy => {
     const b = makeTextBlock({ xyxy: clampBox(xyxy, w, h) });
     const cx = (xyxy[0] + xyxy[2]) / 2, cy = (xyxy[1] + xyxy[3]) / 2;
@@ -528,6 +555,12 @@ function buildBlocks(detections, w, h, rgba, settings) {
       b.bubble_xyxy = best;
     }
     b.font_color = extractFgColor(rgba, w, b.xyxy);
+    // Source style (weight / alignment / line spacing / outline) so the
+    // renderer can match it. Best-effort: a failed estimate keeps defaults.
+    try {
+      const st = estimateBlockStyle(rgba, w, h, b.xyxy);
+      if (st) Object.assign(b, st);
+    } catch { /* keep defaults */ }
     b.source_lang = settings.sourceLang;
     b.target_lang = settings.targetLang;
     return b;
@@ -1129,6 +1162,11 @@ async function runPipeline(tabId, opts = {}) {
     // wait for OCR; see buildBlockMaskData's `if (!blk.text ...)` guard).
     checkCancelled(runId);
     setProgress(runId, 'ocr', 0.38);
+    // Declared OUTSIDE the bare OCR block (function scope) — the translate
+    // step below reads effSettings. Detection can only run after OCR (needs
+    // the OCR'd text), but the debug emit wants the resolved lang in its
+    // title, so the vote happens inside the block, just before the emit.
+    let effSettings = settings;
     {
       // DIAG (2.0.9): prep = crop building + pixelPut (SW side, invisible
       // in r.ms); call = the ML round trip; load rides on r.loadMs.
@@ -1158,6 +1196,39 @@ async function runPipeline(tabId, opts = {}) {
         ocrEngineLabel = (MODEL_GROUPS.find(g => g.id === r.engine) || {}).label || r.engine || '';
         for (const res of r.results) {
           blocks[res.id].text = res.text;
+          blocks[res.id].text_lines = Array.isArray(res.textLines) && res.textLines.length > 1 ? res.textLines : null;
+          // Display lettering read by the band search (a title over artwork):
+          // keep each band's own box, fill colour and caps flag, and tighten the
+          // block to the union of the bands so masking/erasing stays on the title.
+          if (Array.isArray(res.bands) && res.bands.length) {
+            try {
+              const cc = crops.find(q => q.id === res.id);
+              const bandsOut = [];
+              for (const b of res.bands) {
+                const rough = [cc.x + b.x1, cc.y + b.y1, cc.x + b.x2, cc.y + b.y2];
+                const ref = refineTitleBand(rgba, w, h, rough);
+                bandsOut.push({
+                  xyxy: (ref ? ref.box : rough).map(v => Math.round(v)),
+                  color: ref ? ref.color : null,
+                  caps: b.text === b.text.toUpperCase(),
+                  nwords: Math.max(1, b.text.split(/\s+/).filter(Boolean).length),
+                });
+              }
+              const u = bandsOut.reduce((a, q) => [Math.min(a[0], q.xyxy[0]), Math.min(a[1], q.xyxy[1]), Math.max(a[2], q.xyxy[2]), Math.max(a[3], q.xyxy[3])], [1e9, 1e9, -1, -1]);
+              blocks[res.id].src_bands = bandsOut;
+              // All-caps lettering degrades machine translation ("RITORNO A" came
+              // back as "Friday"): translate it in title case instead. The
+              // renderer restores the capitals from each band's caps flag.
+              if (bandsOut.every(q => q.caps)) {
+                blocks[res.id].text = res.text.toLowerCase().replace(/(^|\s)(\p{L})(\p{L}{2,})/gu, (m0, sp, a, rest) => sp + a.toUpperCase() + rest);
+              }
+              blocks[res.id].xyxy = clampBox(u, w, h);
+              blocks[res.id].text_class = 'text_free';
+              blocks[res.id].bubble_xyxy = null;
+              blocks[res.id].font_weight = 'bold';
+              diagPush('ocr title bands block ' + res.id + ': ' + res.bands.map(b => '"' + b.text + '" ' + b.conf.toFixed(2)).join(' | '));
+            } catch { /* keep the plain block */ }
+          }
           ocrStats.set(res.id, { chars: res.chars, chunks: res.chunks, hitCeiling: res.hitCeiling, stopped: res.stopped, skipped: !!res.skipped });
         }
         // DIAG (2.0.9): OCR split + slowest crops, so one Mac run shows
@@ -1190,22 +1261,24 @@ async function runPipeline(tabId, opts = {}) {
           });
         }
       }
+      // Auto-detect source language: Baberu reads all four scripts, so vote
+      // across the OCR'd blocks. Undetectable -> 'ja', the old default.
+      // Runs BEFORE the debug emit so the title can show the resolved lang —
+      // the engine label alone (always Baberu, always ja/en/zh-trained) reads
+      // like "used English" when the source is pinned or detected as Italian.
+      if (settings.sourceLang === 'auto') {
+        const detected = detectPageLang(blocks.map(b => b.text));
+        effSettings = { ...settings, sourceLang: detected || 'ja' };
+        for (const b of blocks) b.source_lang = effSettings.sourceLang;
+      }
       const ocrTextCount = blocks.filter(b => b.text && b.text.trim()).length;
       const clippedCount = [...ocrStats.values()].filter(s => s.hitCeiling).length;
       await emitDebug(runId, tabId, settings, 'ocr', {
         title: `OCR — ${crops.length} crops, ${ocrTextCount} with text${ocrEngineLabel ? ` (${ocrEngineLabel})` : ''}` +
+          `, lang ${effSettings.sourceLang}` +
           (clippedCount ? `, ${clippedCount} hit the 256-char model cap (re-OCR'd in chunks)` : ''),
         crops: ocrThumbs, ms: ocrMs,
       });
-    }
-
-    // Auto-detect source language: Baberu reads all four scripts, so vote
-    // across the OCR'd blocks. Undetectable -> 'ja', the old default.
-    let effSettings = settings;
-    if (settings.sourceLang === 'auto') {
-      const detected = detectPageLang(blocks.map(b => b.text));
-      effSettings = { ...settings, sourceLang: detected || 'ja' };
-      for (const b of blocks) b.source_lang = effSettings.sourceLang;
     }
 
     // ---- 5+6+7. translate || (mask -> inpaint). Translate and mask both need
@@ -1531,6 +1604,12 @@ async function runPipeline(tabId, opts = {}) {
       }
       const totalInpaintMs = Math.round(performance.now() - t0i);
       if (patches.length) diagPush('inpaint split path ' + inpaintPath + ' ms prep ' + prepMs + ' load ' + splitLoadMs + ' gpu ' + inpaintMs + ' paste ' + pasteMs + ' call ' + callMs + ' total ' + totalInpaintMs + (splitReadyMs != null ? ' readyMs ' + splitReadyMs : '') + (splitTileMax ? ' tileMax ' + splitTileMax : ''));
+      // Plain-paper regions: replace LaMa's blurry remnants with the exact
+      // surrounding colour (textured/art backgrounds are left as LaMa made them).
+      try {
+        const flat = flatFillMasked(inpainted, w, entries);
+        if (flat.total) diagPush('inpaint flat-fill: ' + flat.filled + '/' + flat.total + ' mask tiles on plain background (rest keep the LaMa result)');
+      } catch { /* the LaMa result stands */ }
       parProgress('inpaint', 1);
       await emitDebug(runId, tabId, settings, 'inpaint', {
         title: `Inpaint — ${patches.length} patches`,
@@ -2101,6 +2180,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       sendResponse({ ok: !!granted });
     }, () => sendResponse({ ok: false }));
+    return true;
+  }
+  // Bundled render fonts (fonts/*.woff2). Served by the worker so the page
+  // never needs web_accessible_resources (no extension-URL fingerprinting).
+  // Strict whitelist of file names — nothing else in the package is readable.
+  if (msg && msg.type === MSG.FONT_BYTES) {
+    const file = String(msg.file || '');
+    if (!/^noto-(sans|serif)-(latin|latin-ext|cyrillic|cyrillic-ext|vietnamese)-(400|700)-normal\.woff2$/.test(file)) {
+      sendResponse({ ok: false, error: 'bad font name' });
+      return false;
+    }
+    fetch(chrome.runtime.getURL('fonts/' + file))
+      .then(r => r.ok ? r.arrayBuffer() : Promise.reject(new Error('HTTP ' + r.status)))
+      .then(buf => {
+        const u8 = new Uint8Array(buf);
+        let bin = '';
+        for (let i = 0; i < u8.length; i += 0x8000) bin += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+        sendResponse({ ok: true, b64: btoa(bin) });
+      })
+      .catch(e => sendResponse({ ok: false, error: String((e && e.message) || e).slice(0, 120) }));
     return true;
   }
   (async () => {

@@ -165,6 +165,9 @@
   "model_inpaint": {
     "message": "LaMa 인페인터(만화용)"
   },
+  "model_ppocr_latin": {
+    "message": "PP-OCRv6 라틴 문자 OCR (이탈리아어 + 독일어 + 프랑스어 + 스페인어 + 포르투갈어 + 네덜란드어 + 덴마크어 + 노르웨이어)"
+  },
   "models": {
     "message": "모델"
   },

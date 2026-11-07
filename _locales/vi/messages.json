@@ -165,6 +165,9 @@
   "model_inpaint": {
     "message": "Trình phục hồi nền LaMa (manga)"
   },
+  "model_ppocr_latin": {
+    "message": "PP-OCRv6 OCR Latin (Italy + Đức + Pháp + Tây Ban Nha + Bồ Đào Nha + Hà Lan + Đan Mạch + Na Uy)"
+  },
   "models": {
     "message": "Mô hình"
   },

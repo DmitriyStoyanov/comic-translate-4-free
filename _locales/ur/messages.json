@@ -216,6 +216,9 @@
   "model_inpaint": {
     "message": "LaMa ان پینٹر (مانگا)"
   },
+  "model_ppocr_latin": {
+    "message": "PP-OCRv6 لاطینی OCR (اطالوی + جرمن + فرانسیسی + ہسپانوی + پرتگالی + ولندیزی + ڈانیش + نارویجین)"
+  },
   "models": {
     "message": "ماڈلز"
   },

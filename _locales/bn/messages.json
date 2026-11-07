@@ -165,6 +165,9 @@
   "model_inpaint": {
     "message": "LaMa ইনপেইন্টার (মাঙ্গা)"
   },
+  "model_ppocr_latin": {
+    "message": "PP-OCRv6 ল্যাটিন OCR (ইতালীয় + জার্মান + ফরাসি + স্পানিশ + পর্তুগিজ + ওলন্দাজ + ডানিশ + নরওয়েজিয়ান)"
+  },
   "models": {
     "message": "মডেল"
   },

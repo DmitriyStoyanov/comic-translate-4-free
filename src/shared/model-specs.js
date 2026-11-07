@@ -35,21 +35,54 @@ export const MODEL_GROUPS = [
         url: hf('genshiai-daichi/baberu-ocr', 'onnx/decoder_step_int8.onnx') },
     ],
   },
+  {
+    id: 'ocr-ppocr-latin', labelKey: 'model_ppocr_latin',
+    label: 'PP-OCRv6 Latin OCR (Italian + German + French + Spanish + Portuguese + Dutch + Danish + Norwegian)',
+    files: [
+      // Latin-script languages only: Baberu reads ja/en/zh and hallucinates
+      // English gibberish on Italian/German/etc. bubbles, so pinned Latin
+      // sources route here (ocrEngineForLang). rec-only — the detector's
+      // text boxes become crops, split into lines in ml/ppocr.js.
+      // PP-OCRv6 small rec (PaddlePaddle official ONNX, 2026-11-07) replaces
+      // the PP-OCRv5 latin mobile rec (7.9MB). Its 18.7k-entry dict covers
+      // all Latin accents (è í ü ñ ç ø å ß) and it read 4/4 accented it/de/
+      // fr/da test lines exactly at ~100-170ms/line in WASM. Medium (76MB)
+      // also 4/4 at ~450ms; tiny (4.5MB) mangled spaces/accents. The earlier
+      // PP-OCRv5 SERVER rec was rejected: its dict lacks è/í, it dropped
+      // characters, and cost ~25s per line.
+      // New file ID (-v6s): size changed, and the old ID must not be reused.
+      { id: 'ocr-ppocr-latin-v6s', file: 'inference.onnx', bytes: 21159378,
+        url: hf('PaddlePaddle/PP-OCRv6_small_rec_onnx', 'inference.onnx') },
+    ],
+  },
 ];
 
+// Latin-script source languages served by PP-OCRv6 small. nb = Norwegian
+// Bokmål, da = Danish — both verified on this model (2026-11-07).
+export const LATIN_LANGS = new Set(['it', 'de', 'fr', 'es', 'pt', 'nl', 'da', 'nb']);
+
 // OCR engine routing by source language (LANGS in shared/settings.js):
-//   ja/en/zh-CN/zh-TW -> Baberu ('ocr-baberu' group; manga-trained)
+//   ja/en/zh-CN/zh-TW/auto -> Baberu ('ocr-baberu' group; manga-trained)
+//   Latin (it/de/fr/es/pt/nl/da/nb) -> PP-OCRv6 small ('ocr-ppocr-latin')
+// 'auto' stays Baberu: detection needs the OCR'd text, and Baberu is the
+// only engine that reads CJK/kana — a Latin page under 'auto' reads as
+// English gibberish, so pin the Latin language for the latin engine.
 // (manga-ocr removed 2026-09-29: superseded by Baberu for Japanese.
 // Pororo + PP-OCRv5 en/chinese models removed 2026-09-28: superseded.
 // PP-OCRv6 small removed 2026-09-29: Baberu covers Traditional Chinese.
 // PP-OCRv5 Korean removed 2026-09-29: OCR quality too low for translation.)
 export function ocrEngineForLang(lang) {
-  return 'ocr-baberu'; // all source languages use Baberu
+  return LATIN_LANGS.has(lang) ? 'ocr-ppocr-latin' : 'ocr-baberu';
 }
 
 // Baberu character vocab, bundled (JSON array; id>=4 -> charset[id-4]).
 // From genshiai-daichi/baberu-ocr tokenizer/vocab.json.
 export const BABERU_VOCAB_ASSET = 'src/offscreen/ml/dicts/baberu-vocab.json';
+
+// PP-OCR CTC dictionaries, bundled (one line per class; class 0 = blank).
+export const PPOCR_DICT_ASSET = {
+  'ocr-ppocr-latin': 'src/offscreen/ml/dicts/ppocrv6-latin.txt',
+};
 
 export const ALL_FILES = MODEL_GROUPS.flatMap(g =>
   g.files.map(f => ({ ...f, group: g.id, groupLabel: g.label })));
@@ -95,6 +128,9 @@ export async function deleteModelGroup(groupId) {
 // before the v1.1 download so users don't carry ~70MB of stale weights.
 // Baberu v1.1 files (2026-10-26): superseded by v1.2 (-v12 IDs); pruned
 // before the v1.2 download so users don't carry ~122MB of stale weights.
+// 'ocr-ppocr-latin' (PP-OCRv5 latin mobile rec file ID) is pruned again:
+// superseded by 'ocr-ppocr-latin-v6s' (PP-OCRv6 small), so users don't keep
+// ~7.9MB of stale weights. The GROUP id 'ocr-ppocr-latin' is unchanged.
 const PRUNED_MODEL_IDS = ['ocr-ppocr-latin', 'ocr-ppocr-eslav', 'ocr-pororo', 'ocr-ppocr-en', 'ocr-ppocr-chinese', 'ocr-ppocrv6', 'ocr-ppocr-ko', 'ocr-encoder', 'ocr-decoder-init', 'ocr-decoder-step', 'ocr-baberu-prefill', 'ocr-baberu-step', 'ocr-baberu-vision', 'ocr-baberu-prefill-v11', 'ocr-baberu-step-v11'];
 export { PRUNED_MODEL_IDS };
 // Fingerprint of the model list (group + file IDs + expected sizes).

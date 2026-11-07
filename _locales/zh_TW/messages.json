@@ -165,6 +165,9 @@
   "model_inpaint": {
     "message": "LaMa 影像修補（漫畫專用）"
   },
+  "model_ppocr_latin": {
+    "message": "PP-OCRv6 拉丁語系 OCR（義大利文 + 德文 + 法文 + 西班牙文 + 葡萄牙文 + 荷蘭文 + 丹麥文 + 挪威文）"
+  },
   "models": {
     "message": "模型"
   },

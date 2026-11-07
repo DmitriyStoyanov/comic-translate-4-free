@@ -2,7 +2,7 @@
 // (Content scripts use chrome.storage directly via messaging to avoid duplication.)
 
 export const DEFAULT_SETTINGS = {
-  sourceLang: 'auto', // 'auto' = detect from the OCR'd text; or 'ja' | 'en' | 'zh-CN' | 'zh-TW'
+  sourceLang: 'auto', // 'auto' = detect from the OCR'd text; or 'ja' | 'en' | 'it' | 'zh-CN' | 'zh-TW'
   targetLang: 'en',
   translationBackend: 'google', // 'google' | 'azure' | 'lmstudio' | 'local-llm'
   backendFailover: true, // if the selected backend fails, try another (default on, 2026-10-26)
@@ -24,14 +24,14 @@ export const DEFAULT_SETTINGS = {
 };
 
 export const LANGS = [
-  ['ja', 'Japanese'], ['en', 'English'], ['zh-CN', 'Chinese (Simplified)'],
-  ['zh-TW', 'Chinese (Traditional)'],
+  ['ja', 'Japanese'], ['en', 'English'], ['it', 'Italian'],
+  ['zh-CN', 'Chinese (Simplified)'], ['zh-TW', 'Chinese (Traditional)'],
 ];
 
 // Native names for the source-language dropdowns in popup/options UI.
 export const NATIVE_LANGS = [
-  ['ja', '日本語'], ['en', 'English'], ['zh-CN', '简体中文'],
-  ['zh-TW', '繁體中文'],
+  ['ja', '日本語'], ['en', 'English'], ['it', 'Italiano'],
+  ['zh-CN', '简体中文'], ['zh-TW', '繁體中文'],
 ];
 
 // Every language both Google Translate and Azure Translator support

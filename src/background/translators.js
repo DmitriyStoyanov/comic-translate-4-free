@@ -681,8 +681,21 @@ async function localLlm(texts, settings, signal) {
 
 export async function translateBlocks(blocks, settings, onProgress, signal, deadlineMs = 30000, isUserCancelled) {
   const idx = [], texts = [];
+  // List-like blocks (ragged entries, e.g. a table of contents) are sent line by
+  // line so entries are not merged into one sentence; `spans` maps each block
+  // back to its slice of `texts`.
+  const spans = [];
   blocks.forEach((b, i) => {
-    if (b.text && b.text.trim()) { idx.push(i); texts.push(b.text); }
+    if (!(b.text && b.text.trim())) return;
+    idx.push(i);
+    const lines = b.list_like && Array.isArray(b.text_lines) ? b.text_lines : null;
+    if (lines && lines.length > 1) {
+      spans.push([texts.length, lines.length]);
+      texts.push(...lines);
+    } else {
+      spans.push([texts.length, 1]);
+      texts.push(b.text);
+    }
   });
   const translated = new Array(blocks.length).fill('');
   if (!texts.length) return translated;
@@ -804,7 +817,9 @@ export async function translateBlocks(blocks, settings, onProgress, signal, dead
     }
     if (lastErr) throw lastErr;
   }
-  results.forEach((t, k) => { translated[idx[k]] = t; });
+  spans.forEach(([start, n], k) => {
+    translated[idx[k]] = results.slice(start, start + n).map(t => String(t || '').replace(/\s*\n\s*/g, ' ').trim()).join('\n');
+  });
   // Record which backend produced the translation (surfaced in debug rows).
   blocks.forEach(b => { b.backendUsed = backendUsed; });
   onProgress && onProgress();

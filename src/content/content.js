@@ -5,7 +5,57 @@
   if (window.__ctContentLoaded) return;
   window.__ctContentLoaded = true;
 
-  const FONT_STACK = '"Noto Sans CJK JP","Hiragino Kaku Gothic ProN","Hiragino Sans","Yu Gothic","Noto Sans",sans-serif';
+  // Bundled render fonts (fonts/*.woff2, SIL OFL): "CT Sans" = Noto Sans,
+  // "CT Serif" = Noto Serif, regular + bold, per-script subsets. They are
+  // loaded from bytes served by the service worker (see ensureFonts), so a
+  // page's CSP cannot block them. CJK and anything the subsets lack falls
+  // through to the system fonts in each stack.
+  const SANS_STACK = '"CT Sans","Noto Sans CJK JP","Hiragino Kaku Gothic ProN","Hiragino Sans","Yu Gothic","Noto Sans",sans-serif';
+  const SERIF_STACK = '"CT Serif","Noto Serif CJK JP","Hiragino Mincho ProN","Yu Mincho","Noto Serif",serif';
+  const FONT_SUBSETS = {
+    'latin': 'U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD',
+    'latin-ext': 'U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF',
+    'cyrillic': 'U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116',
+    'cyrillic-ext': 'U+0460-052F,U+1C80-1C8A,U+20B4,U+2DE0-2DFF,U+A640-A69F,U+FE2E-FE2F',
+    'vietnamese': 'U+0102-0103,U+0110-0111,U+0128-0129,U+0168-0169,U+01A0-01A1,U+01AF-01B0,U+0300-0301,U+0303-0304,U+0308-0309,U+0323,U+0329,U+1EA0-1EF9,U+20AB',
+  };
+  const fontLoads = new Map(); // 'sans-400' -> Promise (never rejects)
+  function requestFont(file) {
+    return new Promise((resolve, reject) => {
+      try {
+        chrome.runtime.sendMessage({ type: 'ct/font', file }, r => {
+          if (chrome.runtime.lastError || !r || !r.ok) reject(new Error((r && r.error) || 'font request failed'));
+          else resolve(r.b64);
+        });
+      } catch (e) { reject(e); }
+    });
+  }
+  function loadFontSet(fam, weight) {
+    const key = fam + '-' + weight;
+    if (!fontLoads.has(key)) {
+      const name = fam === 'serif' ? 'CT Serif' : 'CT Sans';
+      fontLoads.set(key, Promise.all(Object.entries(FONT_SUBSETS).map(async ([sub, range]) => {
+        try {
+          const bin = atob(await requestFont(`noto-${fam}-${sub}-${weight}-normal.woff2`));
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          const face = new FontFace(name, bytes.buffer, { weight: String(weight), unicodeRange: range });
+          await face.load();
+          document.fonts.add(face);
+        } catch { /* missing subset: system fallback covers it */ }
+      })).then(() => undefined));
+    }
+    return fontLoads.get(key);
+  }
+  // Load exactly the family/weight pairs the page's blocks use.
+  function ensureFonts(blocks) {
+    const need = new Set();
+    for (const b of blocks) {
+      if (!(b.translation || b.text)) continue;
+      need.add((b.font_family === 'serif' ? 'serif' : 'sans') + '-' + (b.font_weight === 'bold' || (b.src_bands && b.src_bands.length) ? 700 : 400));
+    }
+    return Promise.all([...need].map(k => { const [f, w] = k.split('-'); return loadFontSet(f, +w); }));
+  }
 
   // Browser canvas size guards (mirrors src/shared/image-ops.js renderScale —
   // this is a classic script, no modules, so the constants are duplicated).
@@ -32,11 +82,22 @@
     return [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2];
   }
 
+  // A "bubble" far larger than its text is not a speech bubble but a layout
+  // panel (a white caption box holding whole columns): shrinking it by 30%
+  // would crush the text into the middle of the panel, so such text renders
+  // in its own text box instead. Real bubbles are ~1.2-2.5x their text.
+  function isRealBubble(block) {
+    if (block.text_class !== 'text_bubble' || !block.bubble_xyxy) return false;
+    const areaOf = b => Math.max(0, b[2] - b[0]) * Math.max(0, b[3] - b[1]);
+    return areaOf(block.bubble_xyxy) <= 3.2 * Math.max(1, areaOf(block.xyxy));
+  }
+
   // Port of get_best_render_area + adjust_blks_size: bubble interior (ogkalu2's
   // shrink_bbox with 0.3 = 30% total shrink, i.e. 15% inset per side), else
   // the text box; -5px each side except zh source.
   function renderAreaFor(block, srcLang) {
-    let area = (block.text_class === 'text_bubble' && block.bubble_xyxy)
+    const realBubble = isRealBubble(block);
+    let area = realBubble
       ? shrinkBbox(block.bubble_xyxy, 0.3)
       : block.xyxy.slice();
     // 5px inset was for Latin source text (to avoid bubble outlines).
@@ -51,22 +112,43 @@
 
   const isCJK = s => /[\u3040-\u30ff\u4e00-\u9faf\uac00-\ud7af]/.test(s);
 
-  function wrapGreedy(ctx, text, maxW) {
+  // maxW is a number, or a function of the line index (lines next to artwork
+  // are narrower: the source text wrapped around it).
+  function wrapGreedy(ctx, text, maxWArg) {
+    const W = typeof maxWArg === 'function' ? maxWArg : () => maxWArg;
+    // List-like blocks: each source line is its own entry, so wrap every
+    // '\n'-separated paragraph separately and keep the breaks.
+    if (curHardBreaks && text.includes('\n')) {
+      const out = [];
+      for (const para of text.split('\n')) {
+        if (!para.trim()) continue;
+        const base = out.length;
+        out.push(...wrapGreedyPara(ctx, para, (k) => W(base + k)));
+      }
+      return out;
+    }
+    return wrapGreedyPara(ctx, text, W);
+  }
+
+  function wrapGreedyPara(ctx, text, W) {
     // word wrap for spaced text, char wrap for CJK / long words
     const words = text.split(/(\s+)/).filter(t => t.length);
     const lines = [];
     let cur = '';
-    const push = () => { if (cur) lines.push(cur); cur = ''; };
+    // Trim trailing whitespace: a space left on a wrapped line is measured by
+    // the fit check and can fail a size that really fits (worse with many lines).
+    const push = () => { if (cur.trim()) lines.push(cur.trimEnd()); cur = ''; };
     for (const w of words) {
       if (/^\s+$/.test(w)) { cur += w; continue; }
       const trial = cur + w;
-      if (ctx.measureText(trial).width <= maxW || !cur.trim()) {
-        if (ctx.measureText(trial).width <= maxW) { cur = trial; continue; }
+      const cap = W(lines.length);
+      if (ctx.measureText(trial).width <= cap || !cur.trim()) {
+        if (ctx.measureText(trial).width <= cap) { cur = trial; continue; }
         // single word too long: char-break it
         push();
         let cw = '';
         for (const ch of w) {
-          if (ctx.measureText(cw + ch).width > maxW && cw) { lines.push(cw); cw = ''; }
+          if (ctx.measureText(cw + ch).width > W(lines.length) && cw) { lines.push(cw); cw = ''; }
           cw += ch;
         }
         cur = cw;
@@ -79,10 +161,10 @@
     // CJK: also break lines that are still too wide, char by char
     const out = [];
     for (const line of lines) {
-      if (ctx.measureText(line).width <= maxW || !isCJK(line)) { out.push(line); continue; }
+      if (ctx.measureText(line).width <= W(out.length) || !isCJK(line)) { out.push(line); continue; }
       let cw = '';
       for (const ch of line) {
-        if (ctx.measureText(cw + ch).width > maxW && cw) { out.push(cw); cw = ''; }
+        if (ctx.measureText(cw + ch).width > W(out.length) && cw) { out.push(cw); cw = ''; }
         cw += ch;
       }
       if (cw) out.push(cw);
@@ -94,29 +176,32 @@
   // Binary search (~7 iterations) replaces the old 0.75px linear scan (~40
   // iterations, each doing a full wrap + measure pass). "Fits" is monotonic
   // in size, so the search converges to the largest fitting size.
-  function fitFont(ctx, text, rw, rh, initSize, minSize, vertical) {
+  function fitFont(ctx, text, rw, rh, initSize, minSize, vertical, widthAt) {
     // Early exit: degenerate box — skip the binary search entirely.
     if (!(rw > 0 && rh > 0)) {
       const size = minSize;
-      ctx.font = `${size}px ${FONT_STACK}`;
+      ctx.font = fontStr(size);
       return vertical
-        ? { size, lines: wrapVertical(text, 1), lh: size * 1.18 }
-        : { size, lines: [text], lh: size * 1.18 };
+        ? { size, lines: wrapVertical(text, 1), lh: size * lhK }
+        : { size, lines: [text], lh: size * lhK };
     }
     const fits = (size) => {
       // Cache the font string per size probe — wrapGreedy/wrapVertical call
       // measureText many times but the font only changes here.
-      ctx.font = `${size}px ${FONT_STACK}`;
-      const lh = size * 1.18;
+      ctx.font = fontStr(size);
+      const lh = size * lhK;
       if (vertical) {
         // charsPerCol must be >= 1: rh < lh (tiny box) would give 0 and hang
         // wrapVertical forever on `i += 0`.
         const cols = wrapVertical(text, Math.max(1, Math.floor(rh / lh)));
         return { ok: cols.length * (size * 1.05) <= rw, lines: cols, lh };
       }
-      const lines = wrapGreedy(ctx, text, rw);
-      const maxW = lines.reduce((m, l) => Math.max(m, ctx.measureText(l).width), 0);
-      return { ok: lines.length * lh <= rh && maxW <= rw, lines, lh };
+      const wf = widthAt ? (k) => widthAt(k, lh) : rw;
+      const lines = wrapGreedy(ctx, text, wf);
+      const wOf = (k) => (widthAt ? widthAt(k, lh) : rw);
+      let fitsW = true;
+      for (let k = 0; k < lines.length; k++) if (ctx.measureText(lines[k]).width > wOf(k) + 0.5) { fitsW = false; break; }
+      return { ok: lines.length * lh <= rh && fitsW, lines, lh };
     };
     let best = null;
     let lo = minSize, hi = initSize;
@@ -130,10 +215,10 @@
     }
     if (!best) {
       const size = minSize;
-      ctx.font = `${size}px ${FONT_STACK}`;
+      ctx.font = fontStr(size);
       best = vertical
-        ? { size, lines: wrapVertical(text, Math.max(1, Math.floor(rh / (size * 1.18)))), lh: size * 1.18 }
-        : { size, lines: wrapGreedy(ctx, text, rw), lh: size * 1.18 };
+        ? { size, lines: wrapVertical(text, Math.max(1, Math.floor(rh / (size * lhK)))), lh: size * lhK }
+        : { size, lines: wrapGreedy(ctx, text, widthAt ? (k) => widthAt(k, size * lhK) : rw), lh: size * lhK };
     }
     return best;
   }
@@ -166,10 +251,109 @@
     return Math.min(maxSize, Math.max(minSize, est));
   }
 
+  // Per-block style state, set at the top of drawBlock (the fit helpers read
+  // it): weight from the source's stroke thickness, line-height factor from
+  // the source's line pitch.
+  let curWeight = 'normal';
+  let curFamily = 'sans';
+  let lhK = 1.18;
+  let curHardBreaks = false;
+  function fontStr(size) { return `${curWeight === 'bold' ? 'bold ' : ''}${size}px ${curFamily === 'serif' ? SERIF_STACK : SANS_STACK}`; }
+
+  // Canvas text state can carry non-default tracking (letterSpacing /
+  // wordSpacing are absolute px, so at a small fitted size they dominate and
+  // make text look sparse and shrink the fit). Pin everything to neutral.
+  function resetTextSpacing(ctx) {
+    try { ctx.letterSpacing = '0px'; } catch { /* unsupported */ }
+    try { ctx.wordSpacing = '0px'; } catch { /* unsupported */ }
+    try { ctx.fontKerning = 'normal'; } catch { /* unsupported */ }
+    try { ctx.textRendering = 'optimizeLegibility'; } catch { /* unsupported */ }
+  }
+
+  // Display lettering (titles): the source was several styled lines (e.g. a small
+  // teal line over a big red one). The translation is ONE phrase, so its words
+  // are shared out over the source bands in proportion to the source word counts
+  // (every band gets at least one word when there are enough), and each band is
+  // drawn in its own box, colour, bold weight and a white halo (the inpainted
+  // background there is the source's own halo). A band may widen a little past
+  // the source box: translations are usually longer, and the font then fits the
+  // widened width.
+  function drawBands(ctx, block, text, maxSize, minSize) {
+    const bands = block.src_bands;
+    const words = text.split(/\s+/).filter(Boolean);
+    if (!words.length) return null;
+    const wt = (b) => b.nwords || 1;
+    const totalN = bands.reduce((a, b) => a + wt(b), 0);
+    const counts = [];
+    let used = 0, cum = 0;
+    for (let i = 0; i < bands.length; i++) {
+      cum += wt(bands[i]) / totalN;
+      let upto = i === bands.length - 1 ? words.length : Math.round(words.length * cum);
+      const bandsLeft = bands.length - 1 - i;
+      upto = Math.max(Math.min(used + 1, words.length), Math.min(upto, words.length - bandsLeft));
+      counts.push(Math.max(0, upto - used));
+      used = Math.max(used, upto);
+    }
+    curWeight = 'bold'; curFamily = 'sans'; lhK = 1.1; curHardBreaks = false;
+    resetTextSpacing(ctx);
+    let wi = 0, sizeSum = 0, drawn = 0;
+    const union = [1e9, 1e9, -1, -1];
+    bands.forEach((b, i) => {
+      const part = words.slice(wi, wi + counts[i]).join(' ');
+      wi += counts[i];
+      if (!part) return;
+      const t = b.caps ? part.toLocaleUpperCase() : part;
+      const [bx1, by1, bx2, by2] = b.xyxy;
+      const bw = bx2 - bx1, bh = by2 - by1;
+      const grow = bw * 0.1;
+      const rx1 = bx1 - grow, rw = bw + grow * 2, ry1 = by1 - bh * 0.04, rh = bh * 1.08;
+      const fit = fitFont(ctx, t, rw, rh, Math.min(maxSize, rh), minSize, false, null);
+      ctx.font = fontStr(fit.size);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = Math.max(3, fit.size / 7);
+      ctx.strokeStyle = 'rgba(255,255,255,0.92)';
+      ctx.fillStyle = b.color || block.font_color || '#000000';
+      const cx = rx1 + rw / 2;
+      let y = ry1 + (rh - fit.lines.length * fit.lh) / 2 + fit.lh / 2;
+      for (const line of fit.lines) {
+        ctx.strokeText(line, cx, y);
+        ctx.fillText(line, cx, y);
+        y += fit.lh;
+      }
+      sizeSum += fit.size; drawn++;
+      union[0] = Math.min(union[0], rx1); union[1] = Math.min(union[1], ry1);
+      union[2] = Math.max(union[2], rx1 + rw); union[3] = Math.max(union[3], ry1 + rh);
+    });
+    if (!drawn) return null;
+    const avg = sizeSum / drawn;
+    return { render_xyxy: union.map(v => Math.round(v)), render_font_size: Math.round(avg * 10) / 10, auto_font_size: Math.round(avg * 10) / 10, vertical: false,
+      dbg: `title ${drawn} band(s) ${counts.join('/')} words` };
+  }
+
   function drawBlock(ctx, block, srcLang, maxSize, minSize) {
     const text = (block.translation || block.text || '').trim();
     if (!text) return null;
+    if (Array.isArray(block.src_bands) && block.src_bands.length && block.translation) {
+      const bi = drawBands(ctx, block, text, maxSize, minSize);
+      if (bi) return bi;
+    }
+    resetTextSpacing(ctx);
+    curHardBreaks = !!block.list_like && text.includes('\n');
+    curWeight = block.font_weight === 'bold' ? 'bold' : 'normal';
+    curFamily = block.font_family === 'serif' ? 'serif' : 'sans';
+    lhK = 1.18 * Math.max(0.9, Math.min(1.35, block.line_spacing || 1));
+    // Long free-standing text (magazine columns, synopsis) is a paragraph:
+    // left-aligned and top-anchored like the source, not centered like a bubble.
+    const paragraph = block.text_class !== 'text_bubble' && text.length > 200 &&
+      (block.xyxy[3] - block.xyxy[1]) > (block.xyxy[2] - block.xyxy[0]) * 0.5;
+    // Alignment measured from the source lines (>= 3 body lines); justified
+    // source renders left-aligned. Falls back to the paragraph/center rule.
+    const measured = block.src_lines >= 3 ? block.alignment : null;
+    const align = measured ? (measured === 'justify' ? 'left' : measured) : (paragraph ? 'left' : 'center');
     const area = renderAreaFor(block, srcLang);
+    const realBubble = isRealBubble(block);
     const [x1, y1, x2, y2] = area;
     const rw = Math.max(8, x2 - x1), rh = Math.max(8, y2 - y1);
     const vertical = isCJK(text) && rh > rw * 1.5;
@@ -179,12 +363,30 @@
     // the original size. fitFont then shrinks until it fits the box.
     // Capped by maxSize, floored by minSize — "not too big nor too small".
     const startSize = Math.min(maxSize, Math.max(minSize, autoSize * 1.2));
-    const { size, lines, lh } = fitFont(ctx, text, rw, rh, startSize, minSize, vertical);
-    ctx.font = `${size}px ${FONT_STACK}`;
-    ctx.textAlign = 'center';
+    // Wrap-around: source lines that were indented around artwork (left-aligned
+    // columns only). indentAt(yMid, lh) = the indent of any source line band that
+    // overlaps this text line; the line is shifted right and narrowed by it.
+    const bands = (align === 'left' && Array.isArray(block.src_indents)) ? block.src_indents : null;
+    const indentAt = (yMid, lh) => {
+      // Running maximum: once a line reaches the source's first indented band
+      // (where the artwork starts), every line below keeps at least the largest
+      // indent seen so far. The translation usually has a different line count
+      // than the source, so its lines do not land on the same bands, but the
+      // artwork is still there; a monotone indent keeps clear of it.
+      let m = 0;
+      for (const b of bands) if (b.y1 <= yMid + lh * 0.5) m = Math.max(m, b.x);
+      return m;
+    };
+    const topY = (paragraph || measured === 'left' || measured === 'justify') ? y1 : null;
+    const widthAt = (bands && bands.length && !vertical && topY != null)
+      ? (k, lh) => Math.max(rw * 0.35, rw - indentAt(topY + (k + 0.5) * lh, lh))
+      : null;
+    const { size, lines, lh } = fitFont(ctx, text, rw, rh, startSize, minSize, vertical, widthAt);
+    ctx.font = fontStr(size);
+    ctx.textAlign = align;
     ctx.textBaseline = 'middle';
     const fg = block.font_color || '#000000';
-    const outline = luminance(fg) > 0.5 ? 'rgba(0,0,0,0.9)' : 'rgba(255,255,255,0.9)';
+    const outline = block.stroke_color || (luminance(fg) > 0.5 ? 'rgba(0,0,0,0.9)' : 'rgba(255,255,255,0.9)');
     ctx.lineWidth = Math.max(2, size / 7);
     ctx.lineJoin = 'round';
     ctx.strokeStyle = outline;
@@ -212,17 +414,20 @@
         }
       });
     } else {
-      const cx = (x1 + x2) / 2;
+      const cx = align === 'left' ? x1 : align === 'right' ? x2 : (x1 + x2) / 2;
       const totalH = lines.length * lh;
-      let y = y1 + (rh - totalH) / 2 + lh / 2;
-      for (const line of lines) {
-        ctx.strokeText(line, cx, y);
-        ctx.fillText(line, cx, y);
+      let y = (paragraph || measured === 'left' || measured === 'justify') ? y1 + lh / 2 : y1 + (rh - totalH) / 2 + lh / 2;
+      for (let k = 0; k < lines.length; k++) {
+        const line = lines[k];
+        const lx = widthAt ? cx + (rw - widthAt(k, lh)) : cx;
+        ctx.strokeText(line, lx, y);
+        ctx.fillText(line, lx, y);
         y += lh;
       }
     }
     ctx.restore();
-    return { render_xyxy: area.map(v => Math.round(v)), render_font_size: Math.round(size * 10) / 10, auto_font_size: Math.round(autoSize * 10) / 10, vertical };
+    return { render_xyxy: area.map(v => Math.round(v)), render_font_size: Math.round(size * 10) / 10, auto_font_size: Math.round(autoSize * 10) / 10, vertical,
+      dbg: `${Math.round(rw)}x${Math.round(rh)} ${block.text_class}${realBubble ? '' : block.text_class === 'text_bubble' ? '(panel)' : ''} ${align} ${curWeight} ${curFamily} lh${lhK.toFixed(2)} ${lines.length}ln` };
   }
 
   // ------------------------------------------------------------ main image
@@ -912,6 +1117,8 @@
           const maxSize = 120, minSize = 10;
           const srcLang = (blocks[0] && blocks[0].source_lang) || settings.sourceLang || 'ja';
           const renderInfo = [];
+          // Bundled fonts first; any failure just means the system stack is used.
+          try { await ensureFonts(blocks); } catch { /* fall back */ }
           for (const b of blocks) {
             const info = drawBlock(wctx, b, srcLang, maxSize, minSize);
             if (info) {
@@ -919,7 +1126,7 @@
               // match the downscaled output when the guard kicked in.
               b.render_xyxy = rs < 1 ? info.render_xyxy.map(v => Math.round(v * rs)) : info.render_xyxy;
               b.render_font_size = info.render_font_size;
-              renderInfo.push({ text: b.text, size: info.render_font_size, auto: info.auto_font_size, vertical: info.vertical });
+              renderInfo.push({ text: b.text, size: info.render_font_size, auto: info.auto_font_size, vertical: info.vertical, dbg: info.dbg });
             }
           }
           let replaced = false;
@@ -959,7 +1166,7 @@
           stageTabs['render'] = {
             title: 'Render',
             ms: allTimings.render,
-            rows: renderInfo.map(r => ({ text: r.text, translation: `${r.size}px (auto ${r.auto}px)${r.vertical ? ' vertical' : ''}` })),
+            rows: renderInfo.map(r => ({ text: r.text, translation: `${r.size}px (auto ${r.auto}px)${r.vertical ? ' vertical' : ''} [${r.dbg || ''}]` })),
             totalMs,
             seqMs,
             breakdown: Object.entries(allTimings).filter(([k]) => k !== 'total').map(([k, v]) => `${k} ${v}ms`).join(' · '),

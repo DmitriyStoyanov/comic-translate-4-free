@@ -216,6 +216,9 @@
   "model_inpaint": {
     "message": "LaMa इनपेंटर (मंगा)"
   },
+  "model_ppocr_latin": {
+    "message": "PP-OCRv6 लैटिन OCR (इतालवी + जर्मन + फ्रेंच + स्पेनिश + पुर्तगाली + डच + डैनिश + नॉर्वेजियन)"
+  },
   "models": {
     "message": "मॉडल"
   },

@@ -165,6 +165,9 @@
   "model_inpaint": {
     "message": "Inpainter LaMa (manga)"
   },
+  "model_ppocr_latin": {
+    "message": "PP-OCRv6 OCR latină (italiană + germană + franceză + spaniolă + portugheză + neerlandeză + daneză + norvegiană)"
+  },
   "models": {
     "message": "Modele"
   },

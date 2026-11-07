@@ -279,10 +279,50 @@ function cropPageRgba(pageRgba, pageW, x1, y1, x2, y2) {
   return out;
 }
 
+// Display lettering (title bands from the band OCR): the generic Otsu mask fails
+// on gradients and artwork, so build the mask directly from each band's own
+// colour - pixels inside the band box close to its fill colour - then grow it a
+// few pixels to take the anti-aliased edge and any outline with it.
+function buildBandMaskData(pageRgba, pageW, pageH, blk) {
+  const parse = (c) => { const m = /rgb\((\d+),(\d+),(\d+)\)/.exec(c || ''); return m ? [+m[1], +m[2], +m[3]] : null; };
+  const bands = blk.src_bands.filter(b => parse(b.color));
+  if (!bands.length) return null;
+  const PAD = 14;
+  let ux1 = 1e9, uy1 = 1e9, ux2 = -1, uy2 = -1;
+  for (const b of bands) {
+    ux1 = Math.min(ux1, b.xyxy[0]); uy1 = Math.min(uy1, b.xyxy[1]);
+    ux2 = Math.max(ux2, b.xyxy[2]); uy2 = Math.max(uy2, b.xyxy[3]);
+  }
+  const cx1 = Math.max(0, Math.floor(ux1 - PAD)), cy1 = Math.max(0, Math.floor(uy1 - PAD));
+  const cx2 = Math.min(pageW, Math.ceil(ux2 + PAD)), cy2 = Math.min(pageH, Math.ceil(uy2 + PAD));
+  const cw = cx2 - cx1, ch = cy2 - cy1;
+  if (cw <= 0 || ch <= 0) return null;
+  const m = new Uint8Array(cw * ch);
+  let any = false;
+  for (const b of bands) {
+    const [r0, g0, b0] = parse(b.color);
+    const bx1 = Math.max(cx1, Math.floor(b.xyxy[0]) - 4), by1 = Math.max(cy1, Math.floor(b.xyxy[1]) - 4);
+    const bx2 = Math.min(cx2, Math.ceil(b.xyxy[2]) + 4), by2 = Math.min(cy2, Math.ceil(b.xyxy[3]) + 4);
+    for (let y = by1; y < by2; y++) {
+      for (let x = bx1; x < bx2; x++) {
+        const o = (y * pageW + x) * 4;
+        const dr = pageRgba[o] - r0, dg = pageRgba[o + 1] - g0, db = pageRgba[o + 2] - b0;
+        if (dr * dr + dg * dg + db * db < 75 * 75) { m[(y - cy1) * cw + (x - cx1)] = 1; any = true; }
+      }
+    }
+  }
+  if (!any) return null;
+  return { mask: from01(dilate(m, cw, ch, 3, 4)), w: cw, h: ch, bounds: [cx1, cy1, cx2, cy2] };
+}
+
 // ---- build_block_mask_data ----------------------------------------------------------
 // Returns {mask: 0/255 Uint8Array, w, h, bounds:[x1,y1,x2,y2]} or null.
 export function buildBlockMaskData(pageRgba, pageW, pageH, pageGray, blk, defaultPadding = 5) {
   if (!blk.text && !blk.translation) return null;
+  if (Array.isArray(blk.src_bands) && blk.src_bands.length) {
+    const bm = buildBandMaskData(pageRgba, pageW, pageH, blk);
+    if (bm) return bm;
+  }
   const [cx1, cy1, cx2, cy2] = resolveBlockCropBounds(pageW, pageH, blk, defaultPadding);
   const cw = cx2 - cx1, ch = cy2 - cy1;
   if (cw <= 0 || ch <= 0) return null;
@@ -293,6 +333,18 @@ export function buildBlockMaskData(pageRgba, pageW, pageH, pageGray, blk, defaul
   for (let i = 0; i < cropMask.length; i++) { if (cropMask[i]) { any = true; break; } }
   if (!any) return null;
   cropMask = from01(morphClose(to01(cropMask), cw, ch));
+  // Artwork the source text wrapped around (a character, a drawing): the lines
+  // next to it were indented, so the strip at the column's left edge, from the
+  // first indented line down, is not text. Its dark/white shapes would otherwise
+  // pass for glyph-like components and get erased (e.g. a character's face).
+  if (Array.isArray(blk.src_indents) && blk.src_indents.length) {
+    const minInd = Math.min(...blk.src_indents.map(b => b.x));
+    const topY = Math.min(...blk.src_indents.map(b => b.y1));
+    const zx1 = Math.max(0, Math.round(blk.xyxy[0] - cx1) - 6);
+    const zx2 = Math.min(cw, Math.round(blk.xyxy[0] - cx1 + minInd * 0.85));
+    const zy1 = Math.max(0, Math.round(topY - cy1) - 4);
+    for (let y = zy1; y < ch; y++) for (let x = zx1; x < zx2; x++) cropMask[y * cw + x] = 0;
+  }
 
   const isBubble = blk.text_class === 'text_bubble' && blk.bubble_xyxy && blk.bubble_xyxy.length >= 4;
   const [tx1, ty1, tx2, ty2] = blk.xyxy.map(v => Math.round(v));
@@ -303,6 +355,27 @@ export function buildBlockMaskData(pageRgba, pageW, pageH, pageGray, blk, defaul
   // producing giant LaMa patches (slow, blurry, OOM-prone).
   const sel = selectTextLikeComponents({ data: cropMask, w: cw, h: ch }, textBounds, searchPadding);
   cropMask = sel.data;
+  // Artwork beside a left-aligned column (a character the text wraps around):
+  // in the LOWER half of the block, a mask component whose centre lies outside
+  // every detected source text line is artwork, not text, and is dropped. The
+  // top half is exempt so a drop cap (taller than a text line) is still erased.
+  if (Array.isArray(blk.src_line_boxes) && blk.src_line_boxes.length) {
+    const bin = new Uint8Array(cw * ch);
+    for (let i = 0; i < bin.length; i++) bin[i] = cropMask[i] ? 1 : 0;
+    const { numLabels, labels, stats } = connectedComponentsWithStats(bin, cw, ch, 8);
+    const midY = blk.xyxy[1] + 0.5 * (blk.xyxy[3] - blk.xyxy[1]);
+    const drop = new Set();
+    for (let l = 1; l <= numLabels; l++) {
+      const st = stats[l];
+      const cxp = cx1 + st.left + st.width / 2, cyp = cy1 + st.top + st.height / 2;
+      if (cyp <= midY) continue;
+      // Right-hand tolerance of ~1.2 line heights: an end-of-line hyphen is too
+      // small to count when the line boxes were built, so it sits just past x2.
+      const inside = blk.src_line_boxes.some(L => cxp >= L.x1 - 6 && cxp <= L.x2 + Math.max(6, (L.y2 - L.y1) * 1.2) && cyp >= L.y1 - 6 && cyp <= L.y2 + 6);
+      if (!inside) drop.add(l);
+    }
+    if (drop.size) for (let i = 0; i < labels.length; i++) if (drop.has(labels[i])) cropMask[i] = 0;
+  }
 
   const k = Math.min(defaultPadding, 3), iters = 2;
   let dilated;
@@ -322,7 +395,12 @@ export function buildBlockMaskData(pageRgba, pageW, pageH, pageGray, blk, defaul
     }
     dilated = out;
   } else {
-    dilated = from01(dilate(to01(cropMask), cw, ch, k, iters));
+    // Free text has no bubble outline to protect, and its anti-aliased edges,
+    // halos and drop shadows survive a 3px x 2 dilation as ghost text after
+    // inpainting. Grow wider (3 passes), and one more for big lettering
+    // (titles), where the halo scales with the glyph size.
+    const big = Math.min(tx2 - tx1, ty2 - ty1) > 60;
+    dilated = from01(dilate(to01(cropMask), cw, ch, k, iters + (big ? 2 : 1)));
   }
   return { mask: dilated, w: cw, h: ch, bounds: [cx1, cy1, cx2, cy2] };
 }
@@ -344,4 +422,73 @@ export function generateMask(pageRgba, pageW, pageH, pageGray, blkList, defaultP
     }
   }
   return { mask: full, entries };
+}
+
+// ---- flat-background fill ---------------------------------------------------------
+// LaMa on a big dense text mask over plain paper leaves blurry grey remnants
+// ("ghost text"). Where the background right around the text is a single
+// plain colour, the right fill is exactly that colour. The test is LOCAL: the
+// mask is walked in 32px tiles and each tile is judged on the unmasked pixels
+// in its own 56px window, so a tile over artwork (a character the mask
+// reaches into, a gradient edge) fails and keeps the LaMa result, while the
+// plain paper next to it is still cleaned. A tile needs >= 80% of its window's
+// background samples within +-10 luminance of the dominant brightness.
+// Writes into `img` (full-page RGBA); returns { filled, total } tile counts.
+export function flatFillMasked(img, pageW, entries, minInlier = 0.85, TILE = 32, MARGIN = 12) {
+  let filled = 0, total = 0;
+  const lumAt = (o) => 0.299 * img[o] + 0.587 * img[o + 1] + 0.114 * img[o + 2];
+  for (const e of entries) {
+    const { mask, w, h } = e;
+    const [cx1, cy1] = e.bounds;
+    if (!(w > 0 && h > 0)) continue;
+    // Display lettering sits on a sky/halo gradient, not plain paper: tiles there
+    // would come out as visible patches, so those stay with the LaMa result.
+    if (e.block && Array.isArray(e.block.src_bands) && e.block.src_bands.length) continue;
+    const grown = dilate(to01(mask), w, h, 3, 2);   // what gets filled (mask + ~2px)
+    for (let ty = 0; ty < h; ty += TILE) {
+      for (let tx = 0; tx < w; tx += TILE) {
+        const ex = Math.min(w, tx + TILE), ey = Math.min(h, ty + TILE);
+        let any = false;
+        for (let y = ty; y < ey && !any; y++) for (let x = tx; x < ex; x++) if (grown[y * w + x]) { any = true; break; }
+        if (!any) continue;
+        total++;
+        const wx1 = Math.max(0, tx - MARGIN), wy1 = Math.max(0, ty - MARGIN);
+        const wx2 = Math.min(w, ex + MARGIN), wy2 = Math.min(h, ey + MARGIN);
+        const hist = new Uint32Array(64);
+        let n = 0;
+        for (let y = wy1; y < wy2; y++) {
+          const row = ((cy1 + y) * pageW + cx1) * 4;
+          for (let x = wx1; x < wx2; x++) {
+            if (grown[y * w + x]) continue;
+            hist[Math.min(63, lumAt(row + x * 4) >> 2)]++; n++;
+          }
+        }
+        if (n < 100) continue;
+        let mode = 0;
+        for (let b = 1; b < 64; b++) if (hist[b] > hist[mode]) mode = b;
+        const center = mode * 4 + 2;
+        let inl = 0, sr = 0, sg = 0, sb = 0;
+        for (let y = wy1; y < wy2; y++) {
+          const row = ((cy1 + y) * pageW + cx1) * 4;
+          for (let x = wx1; x < wx2; x++) {
+            if (grown[y * w + x]) continue;
+            const o = row + x * 4;
+            if (Math.abs(lumAt(o) - center) <= 6) { inl++; sr += img[o]; sg += img[o + 1]; sb += img[o + 2]; }
+          }
+        }
+        if (inl / n < minInlier) continue;
+        const R = Math.round(sr / inl), G = Math.round(sg / inl), B = Math.round(sb / inl);
+        for (let y = ty; y < ey; y++) {
+          const row = ((cy1 + y) * pageW + cx1) * 4;
+          for (let x = tx; x < ex; x++) {
+            if (!grown[y * w + x]) continue;
+            const o = row + x * 4;
+            img[o] = R; img[o + 1] = G; img[o + 2] = B;
+          }
+        }
+        filled++;
+      }
+    }
+  }
+  return { filled, total };
 }

@@ -14,6 +14,7 @@ export const MSG = {
   CHECK_LMSTUDIO: 'ct/check-lmstudio',   // {} -> {ok, detail} | {ok:false, error}
   PAGE_CACHE_STATS: 'ct/page-cache-stats', // {} -> {ok, count, bytes}
   CLEAR_PAGE_CACHE: 'ct/clear-page-cache', // {} -> {ok, count, bytes}
+  FONT_BYTES: 'ct/font', // {file} -> {ok, b64} bundled render font subset (content script has no extension-URL access on arbitrary pages)
   GRANT_IMAGE_HOST: 'ct/grant-image-host', // {host} -> {ok} | {ok:false} (pill "Allow" button; re-runs the pipeline on grant)
   // SW -> popup (broadcast)
   MODEL_PROGRESS: 'ct/model-progress',   // {id, loaded, total}

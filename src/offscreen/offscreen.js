@@ -1,12 +1,13 @@
 // Offscreen ML host: owns ALL onnxruntime-web sessions (detector,
-// Baberu OCR, LaMa inpainter). The service worker orchestrates; this document only runs
+// Baberu OCR, PP-OCRv6 Latin OCR, LaMa inpainter). The service worker orchestrates; this document only runs
 // inference. Models are read from the shared IndexedDB ('ct-db'/'models').
 // Verified: ort 1.30 threaded WASM runs here with numThreads=1 and no COOP/COEP
 // (chrome-extension: pages get SharedArrayBuffer without crossOriginIsolated).
 import { MSG, openDb, idbGet } from '../shared/contracts.js';
-import { ALL_FILES, downloadFileToIdb, readChunked, ocrEngineForLang, BABERU_VOCAB_ASSET } from '../shared/model-specs.js';
+import { ALL_FILES, downloadFileToIdb, readChunked, ocrEngineForLang, BABERU_VOCAB_ASSET, PPOCR_DICT_ASSET } from '../shared/model-specs.js';
 import { Detector } from './ml/detector.js';
 import { BaberuOCR } from './ml/baberu.js';
+import { PPOCRV5 } from './ml/ppocr.js';
 import { meanBrightness } from '../shared/image-ops.js';
 import { Inpainter } from './ml/inpaint.js';
 import { tileOrigins, TILE_MAX } from '../shared/textblock.js';
@@ -363,13 +364,21 @@ async function runThreadBenchmark() {
 
 const detector = new Detector();
 const baberu = new BaberuOCR();
+// One PP-OCR session per language group (model + dict differ per group);
+// created lazily and loaded on first use for that language.
+const ppocr = {
+  'ocr-ppocr-latin': new PPOCRV5(),
+};
 const inpainter = new Inpainter();
 
 // Drop loaded ORT sessions so the next inference re-reads model files from
-// IndexedDB. group: 'detector' | 'ocr-baberu' | 'inpaint' | '*'.
+// IndexedDB. group: 'detector' | 'ocr-baberu' | 'ocr-ppocr-*' |
+// 'inpaint' | '*'.
 async function resetGroup(group) {
   if (group === 'detector' || group === '*') await detector.reset();
   if (group === 'ocr-baberu' || group === '*') await baberu.reset();
+  if (ppocr[group]) await ppocr[group].reset();
+  if (group === '*') for (const k of Object.keys(ppocr)) await ppocr[k].reset();
   if (group === 'inpaint' || group === '*') await inpainter.reset();
 }
 
@@ -476,6 +485,10 @@ async function ensureModel(kind) {
         await loadWithWebgpuFallback(kind, loadBaberu);
       } catch (e) { await baberu.reset(); throw e; }
       baberu.setVocab(vocabJson);
+    } else if (kind === 'ocr-ppocr-latin' && !ppocr[kind].loaded) {
+      // WASM only: 7.8MB CTC model, tens of ms per line — WebGPU adds
+      // nothing and the GPU worker realm has no PP-OCR session by design.
+      await ppocr[kind].load(await modelBuffer('ocr-ppocr-latin-v6s'), await assetText(PPOCR_DICT_ASSET[kind]), ['wasm']);
     } else if (kind === 'inpaint' && !inpainter.loaded) {
       await loadWithWebgpuFallback(kind, async (providers) => {
         await inpainter.load(await modelBuffer('inpaint'), providers);
@@ -842,7 +855,9 @@ const handlers = {
 
   async [MSG.ML_OCR]({ crops, runId, sourceLang }) {
     throwIfCancelled(runId);
-    // OCR engine follows the source language — all languages use Baberu.
+    // OCR engine follows the source language: Baberu for ja/en/zh/'auto',
+    // PP-OCRv6 latin for pinned Latin sources (it/de/fr/es/pt/nl/da/nb —
+    // Baberu reads only ja/en/zh and hallucinates English on these).
     const engine = ocrEngineForLang(sourceLang || 'ja');
     // DIAG (2.0.9): time the model load separately — it runs before t0
     // and is invisible in r.ms, so the SW split can tell load from run
@@ -875,44 +890,66 @@ const handlers = {
     // without a new measurement.
     const results = [];
     try {
-      for (const c of crops) {
-        throwIfCancelled(runId);
-        // DIAG (2.0.9): per-crop ms — Baberu is autoregressive, so time
-        // grows with output tokens; one long crop can dominate the stage.
-        const cT0 = performance.now();
-        const raw = await pixelPeek(c.key);
-        const u8 = new Uint8ClampedArray(raw);
-        // Skip the model on blank crops: ~1ms variance check vs ~1s of
-        // vision+prefill+autoregressive steps. Empty text flows downstream
-        // exactly as if OCR had returned ''.
-        if (cropStddev(u8) < 3.0) {
-          results.push({ id: c.id, text: '', chars: 0, chunks: 0, hitCeiling: false, stopped: 'eos', skipped: true, ms: Math.round(performance.now() - cT0) });
-          continue;
+      if (engine === 'ocr-baberu') {
+        for (const c of crops) {
+          throwIfCancelled(runId);
+          // DIAG (2.0.9): per-crop ms — Baberu is autoregressive, so time
+          // grows with output tokens; one long crop can dominate the stage.
+          const cT0 = performance.now();
+          const raw = await pixelPeek(c.key);
+          const u8 = new Uint8ClampedArray(raw);
+          // Skip the model on blank crops: ~1ms variance check vs ~1s of
+          // vision+prefill+autoregressive steps. Empty text flows downstream
+          // exactly as if OCR had returned ''.
+          if (cropStddev(u8) < 3.0) {
+            results.push({ id: c.id, text: '', chars: 0, chunks: 0, hitCeiling: false, stopped: 'eos', skipped: true, ms: Math.round(performance.now() - cT0) });
+            continue;
+          }
+          // Baberu v1.1 reads up to ~256 chars; the chunked path is a rare
+          // fallback for over-long crops, re-OCR'd in overlapping pieces.
+          let r;
+          try {
+            r = await baberu.ocrChunked(u8, c.width, c.height, {
+              lang: sourceLang || 'ja',
+              shouldAbort: () => cancelledRuns.has(runId),
+            });
+          } catch (e) {
+            // OOM recovery: drop the inpainter (206MB, not needed for OCR)
+            // first to free memory, then retry this crop once. Baberu is
+            // WASM-only by design (1.3.4 Baberu hang on GPU), so there is
+            // deliberately no GPU downgrade path here — the old branch
+            // checking providersFor('ocr-baberu') for 'webgpu' could never
+            // run and was removed in 1.4.0 (m11).
+            if (!isOom(e) || c._oomRetried) throw e;
+            await resetGroup('inpaint');
+            c._oomRetried = true;
+            r = await baberu.ocrChunked(u8, c.width, c.height, {
+              lang: sourceLang || 'ja',
+              shouldAbort: () => cancelledRuns.has(runId),
+            });
+          }
+          results.push({ id: c.id, text: r.text, chars: r.text.length, chunks: r.chunks, hitCeiling: r.hitCeiling, stopped: r.stopped, ms: Math.round(performance.now() - cT0) });
         }
-        // Baberu v1.1 reads up to ~256 chars; the chunked path is a rare
-        // fallback for over-long crops, re-OCR'd in overlapping pieces.
-        let r;
-        try {
-          r = await baberu.ocrChunked(u8, c.width, c.height, {
-            lang: sourceLang || 'ja',
-            shouldAbort: () => cancelledRuns.has(runId),
-          });
-        } catch (e) {
-          // OOM recovery: drop the inpainter (206MB, not needed for OCR)
-          // first to free memory, then retry this crop once. Baberu is
-          // WASM-only by design (1.3.4 Baberu hang on GPU), so there is
-          // deliberately no GPU downgrade path here — the old branch
-          // checking providersFor('ocr-baberu') for 'webgpu' could never
-          // run and was removed in 1.4.0 (m11).
-          if (!isOom(e) || c._oomRetried) throw e;
-          await resetGroup('inpaint');
-          c._oomRetried = true;
-          r = await baberu.ocrChunked(u8, c.width, c.height, {
-            lang: sourceLang || 'ja',
-            shouldAbort: () => cancelledRuns.has(runId),
-          });
+      } else {
+        const inst = ppocr[engine];
+        for (const c of crops) {
+          throwIfCancelled(runId);
+          const cT0 = performance.now();
+          const raw = await pixelPeek(c.key);
+          const u8 = new Uint8ClampedArray(raw);
+          if (cropStddev(u8) < 3.0) {
+            results.push({ id: c.id, text: '', chars: 0, chunks: 0, hitCeiling: false, stopped: 'eos', skipped: true, ms: Math.round(performance.now() - cT0) });
+            continue;
+          }
+          // PP-OCR rec is a single-line model — ocrCropLines splits the crop
+          // into line boxes (otsu + connected components, shared/image-ops)
+          // and OCRs each, joining with '\n'. Cancellation lands between
+          // crops: a crop is <= 16 line passes of tens of ms, fine.
+          // No OOM-retry path: 7.8MB CTC vs Baberu's 122MB — the inpainter
+          // is not the pressure here.
+          const r = await inst.ocrCropLines(u8, c.width, c.height);
+          results.push({ id: c.id, text: r.text, chars: r.text.length, chunks: r.lines, hitCeiling: false, stopped: 'eos', bands: r.bands || null, textLines: r.textLines || null, ms: Math.round(performance.now() - cT0) });
         }
-        results.push({ id: c.id, text: r.text, chars: r.text.length, chunks: r.chunks, hitCeiling: r.hitCeiling, stopped: r.stopped, ms: Math.round(performance.now() - cT0) });
       }
     } finally {
       releaseRun(runId);
