@@ -159,7 +159,7 @@ const CONF_DROP = 0.55;
 // Returns { lines, textIsDark }: textIsDark is the crop's ink polarity
 // (minority side of the Otsu threshold), reused by ocrCropLines to pick
 // whether the rec passes need an inversion.
-function splitIntoLines(rgba, w, h) {
+export function splitIntoLines(rgba, w, h) {
   const gray = toGrayU8(rgba, w, h);
   const t = otsuThreshold(gray);
   // Text is the minority side of the threshold — a bubble crop is mostly
@@ -172,7 +172,7 @@ function splitIntoLines(rgba, w, h) {
   for (let i = 0; i < gray.length; i++) {
     bin[i] = textIsDark ? (gray[i] < t ? 1 : 0) : (gray[i] >= t ? 1 : 0);
   }
-  const { numLabels, stats } = connectedComponentsWithStats(bin, w, h, 8);
+  const { numLabels, labels, stats } = connectedComponentsWithStats(bin, w, h, 8);
   const comps = [];
   for (let k = 1; k <= numLabels; k++) {
     const s = stats[k];
@@ -207,7 +207,107 @@ function splitIntoLines(rgba, w, h) {
     if (!merged) lines.push({ x1: s.left, y1: s.top, x2: s.left + s.width, y2: s.top + s.height });
   }
   lines.sort((a, b) => a.y1 - b.y1 || a.x1 - b.x1);
-  return { lines: mergeNearLines(lines), textIsDark };
+  let result = mergeNearLines(lines);
+  // Tightly set, slightly slanted lettering (hand-lettered comic balloons) gets
+  // chained into tall boxes by the component grouping above — musical notes,
+  // balloon-edge fragments or touching descenders bridge neighbouring lines, so
+  // one box covers 2+ lines and rec reads a squashed mix of both. The row ink
+  // profile is the better line model for such text: when it finds more lines
+  // than the component grouping, use it.
+  if (result.length >= 1) {
+    const alt = splitByProjection(bin, labels, kept, w, h);
+    if (alt && alt.length > result.length) result = alt;
+  }
+  return { lines: result, textIsDark };
+}
+
+// Row-profile line splitter. Ink = pixels of the text-sized components `kept`
+// (artwork was already dropped by height; also drop anything spanning most of
+// the crop width, i.e. balloon outline). Rows whose ink count is a small share
+// of the typical text row are gaps; runs between gaps are lines. Runs far
+// shorter than a line (accent dots) merge into the nearest neighbour; runs far
+// taller (two lines touching) split at their lowest-ink row.
+export function splitByProjection(bin, labels, kept, w, h) {
+  const keep = new Set();
+  for (const s of kept) {
+    if (s.width > 0.6 * w) continue;
+    keep.add(s);
+  }
+  if (keep.size < 8) return null;
+  // component -> label lookup: kept holds stats objects, labels hold indices.
+  // Rebuild membership from bounding boxes (cheap, and exact enough: a pixel
+  // inside a kept component's box that is ink belongs to some component, and
+  // components overlapping a kept box vertically are lines' own glyphs).
+  const rows = new Float32Array(h);
+  const ink = new Uint8Array(w * h);
+  for (const s of keep) {
+    for (let y = s.top; y < s.top + s.height; y++) {
+      for (let x = s.left; x < s.left + s.width; x++) {
+        const i = y * w + x;
+        if (bin[i] && !ink[i]) { ink[i] = 1; rows[y]++; }
+      }
+    }
+  }
+  const sm = new Float32Array(h);
+  for (let y = 0; y < h; y++) {
+    let a = 0, n = 0;
+    for (let d = -1; d <= 1; d++) { const yy = y + d; if (yy >= 0 && yy < h) { a += rows[yy]; n++; } }
+    sm[y] = a / n;
+  }
+  const sorted = Array.from(sm).filter(v => v > 0).sort((a, b) => a - b);
+  if (sorted.length < 8) return null;
+  const ref = sorted[Math.floor(sorted.length * 0.9)];
+  const gapT = 0.14 * ref;
+  let bands = [];
+  let y0 = -1;
+  for (let y = 0; y <= h; y++) {
+    const on = y < h && sm[y] >= gapT;
+    if (on && y0 < 0) y0 = y;
+    if (!on && y0 >= 0) { bands.push({ y1: y0, y2: y }); y0 = -1; }
+  }
+  if (bands.length < 2) return null;
+  const med = (arr) => { const a = [...arr].sort((p, q) => p - q); return a[a.length >> 1]; };
+  let mh = med(bands.map(b => b.y2 - b.y1));
+  // split over-tall bands at their lowest-ink interior row
+  const split = [];
+  for (const b of bands) {
+    const bh = b.y2 - b.y1;
+    if (bh > 1.7 * mh) {
+      const n = Math.round(bh / mh);
+      let from = b.y1;
+      for (let k = 1; k < n; k++) {
+        const target = b.y1 + (bh * k) / n, win = Math.max(2, Math.round(mh * 0.3));
+        let best = Math.round(target), bv = Infinity;
+        for (let yy = Math.round(target) - win; yy <= Math.round(target) + win; yy++) {
+          if (yy > from + 2 && yy < b.y2 - 2 && sm[yy] < bv) { bv = sm[yy]; best = yy; }
+        }
+        split.push({ y1: from, y2: best });
+        from = best;
+      }
+      split.push({ y1: from, y2: b.y2 });
+    } else split.push(b);
+  }
+  bands = split;
+  mh = med(bands.map(b => b.y2 - b.y1));
+  // merge slivers (accent dots, stray specks) into the closest neighbour
+  const out = [];
+  for (const b of bands) {
+    const last = out[out.length - 1];
+    if (last && ((b.y2 - b.y1) < 0.35 * mh || (last.y2 - last.y1) < 0.35 * mh) && b.y1 - last.y2 <= 0.25 * mh) {
+      last.y2 = b.y2;
+    } else out.push({ ...b });
+  }
+  const lines = [];
+  for (const b of out) {
+    if (b.y2 - b.y1 < 0.35 * mh) continue;
+    let x1 = w, x2 = -1;
+    for (let y = b.y1; y < b.y2; y++) {
+      for (let x = 0; x < w; x++) if (ink[y * w + x]) { if (x < x1) x1 = x; if (x > x2) x2 = x; }
+    }
+    if (x2 < 0) continue;
+    lines.push({ x1, y1: b.y1, x2: x2 + 1, y2: b.y2 });
+  }
+  return lines;
 }
 
 // Diacritic-only boxes (the dots of Ü/Ä, apostrophe marks) get merged

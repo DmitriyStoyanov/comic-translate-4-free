@@ -354,3 +354,15 @@ worker, loaded by the content script as "CT Sans" / "CT Serif").
   `fonts/LICENSE-NotoSerif-OFL.txt`). Subsets via the `@fontsource/noto-sans` and
   `@fontsource/noto-serif` packages (same license). The fonts are unmodified and are
   not sold on their own.
+
+---
+
+## Italian word list (src/shared/it-words.js)
+
+Used to repair Italian OCR output (glued words, lost accents).
+
+- The 24,000 most frequent word forms of the Italian OpenSubtitles-2018 frequency list from
+  **FrequencyWords** by Hermit Dave (https://github.com/hermitdave/FrequencyWords), derived
+  from OpenSubtitles (http://www.opensubtitles.org/). Content licensed under
+  CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/). Only the word order was kept;
+  the list was filtered to lower-case alphabetic words.
