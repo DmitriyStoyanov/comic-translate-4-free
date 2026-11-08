@@ -1,5 +1,5 @@
 // Regression checks for the Italian OCR clean-up. Usage: node hidden-audit/it-postprocess.mjs
-import { fixItalianText, isBrandText } from '../src/shared/it-postprocess.js';
+import { fixItalianText, isBrandText, shouldSkipItalianBlock } from '../src/shared/it-postprocess.js';
 const cases = [
   ["C'ECHI CERCA IL PEL NELL'UOVO", "C'È CHI CERCA IL PEL NELL'UOVO"],
   ["MA C'EPURE IL SOTTOSCRITTO", "MA C'È PURE IL SOTTOSCRITTO"],
@@ -22,5 +22,10 @@ const cases = [
 let bad = 0;
 for (const [i, o] of cases) { const g = fixItalianText(i); if (g !== o) { bad++; console.log('FAIL', JSON.stringify(i), '->', JSON.stringify(g), 'expected', JSON.stringify(o)); } }
 if (!isBrandText('l(aitdisne') || !isBrandText('l(aitdisney') || !isBrandText('WALT') || !isBrandText('WALT.') || isBrandText('PAPERINO') || isBrandText('WALTER IL GRANDE')) { bad++; console.log('FAIL brand'); }
+const skip = (t, c) => shouldSkipItalianBlock(fixItalianText(t), c);
+const MAIN = "C'E CHI CERCA IL PEL NELL'UOVO C'ECHI CERCA IL MIEL NEL FAVO... MA C'EPURE IL SOTTOSCRITTO CHE CERCANDO VAGIULIVOJ UNA RIMA,UN VERSO,UN MOTTO PER COMPORRE UN BEL SONETTO";
+if (skip(MAIN, 'text_bubble') || skip(MAIN, 'text_free')) { bad++; console.log('FAIL: real balloon text skipped'); }
+if (!skip('E LA VITANUOVA VTAINOOA DELL\' HMMO NUOIO DELL7tT0IW', 'text_free')) { bad++; console.log('FAIL: junk title not skipped'); }
+if (skip('PFUI! E VECCHIO!', 'text_bubble') || skip('CHE FINE HA FATTO QUEL BRAVO PAPERINO', 'text_free')) { bad++; console.log('FAIL: short real text skipped'); }
 console.log(bad ? bad + ' failure(s)' : 'all ' + (cases.length + 1) + ' checks passed');
 process.exit(bad ? 1 : 0);

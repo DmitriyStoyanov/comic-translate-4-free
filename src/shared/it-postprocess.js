@@ -244,3 +244,21 @@ export function italianWordRatio(text) {
   if (toks.length < 3) return -1;
   return toks.filter(t => RANK.has(t)).length / toks.length;
 }
+
+// A token mixing letters and digits ("DELL7TT0I") is never Italian: it is
+// decorative lettering or artwork the recogniser forced into characters.
+export function hasMixedAlnumToken(text) {
+  return (text || '').split(/\s+/).some(t => { const core = t.replace(/[^\p{L}\p{N}]/gu, ''); return /\p{L}/u.test(core) && /\p{N}/u.test(core) && core.length >= 4; });
+}
+
+// Whether OCR text should be left as printed (not translated, not erased):
+// logos, unreadable lettering, and — for free-standing text (titles, sound
+// effects) where nothing but dictionary quality vouches for the reading —
+// a low share of real words.
+export function shouldSkipItalianBlock(text, textClass) {
+  if (!text) return false;
+  if (isBrandText(text) || hasMixedAlnumToken(text)) return true;
+  const ratio = italianWordRatio(text);
+  if (ratio === -1) return false;
+  return ratio < (textClass === 'text_free' ? 0.6 : 0.34);
+}

@@ -14,7 +14,7 @@ import { pixelPut, pixelTake, pixelDrop, pixelPruneRun } from '../shared/pixel-b
 import { generateMask, flatFillMasked } from '../shared/mask.js';
 import { translateBlocks, checkAzure, checkLmStudio, BACKEND_LABEL, BACKEND_SHORT_LABEL } from './translators.js';
 import { detectPageLang } from '../shared/lang-detect.js';
-import { fixItalianText, isBrandText, italianWordRatio } from '../shared/it-postprocess.js';
+import { fixItalianText, isBrandText, shouldSkipItalianBlock } from '../shared/it-postprocess.js';
 import { estimateBlockStyle, refineTitleBand } from '../shared/style.js';
 import { mlHostAlive, ensureMlHost, callMl, cancelMlForRun, runPooledInpaint, cancelPooledInpaint, largestPatchAreaShare, runGpuInpaint, cancelGpuInpaint, runChromeGpuInpaint, cancelChromeGpuInpaint, notifyChromeGpuProgress, makeCanvas, canvasToBlob, directHandlers, WEBP_TYPE, WEBP_QUALITY, setMlAlarmRecoveryHook } from './ml-bridge.js';
 import {
@@ -1205,7 +1205,7 @@ async function runPipeline(tabId, opts = {}) {
           }
           // Logos (Walt Disney…) and unreadable lettering stay as printed:
           // empty text means the block is neither translated nor erased.
-          if (settings.sourceLang === 'it' && res.text && (isBrandText(res.text) || italianWordRatio(res.text) !== -1 && italianWordRatio(res.text) < 0.34)) {
+          if (settings.sourceLang === 'it' && res.text && shouldSkipItalianBlock(res.text, blocks[res.id].text_class)) {
             diagPush('ocr skip block ' + res.id + (isBrandText(res.text) ? ' (brand)' : ' (unreadable)') + ': ' + JSON.stringify(res.text.slice(0, 60)));
             res.text = ''; res.textLines = null; res.bands = null; res.chars = 0;
           }
