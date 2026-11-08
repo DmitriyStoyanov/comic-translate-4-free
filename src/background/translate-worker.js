@@ -7,13 +7,13 @@ self.onmessage = async (e) => {
   const { blocks, settings } = e.data;
   // Deadline signal: the worker used to pass null, so Google/Azure fetch
   // had no abort signal and no timeout — a stalled backend hung the pill
-  // forever. Abort at 30s, matching the Chrome path's abortController.
+  // forever. Abort at 120s, matching the Chrome path's abortController.
   // The abort is a failover trigger now, not a kill: translateBlocks
   // rescues onto a fresh signal when the abort wasn't a user cancel.
   // The deadlineMs arg only caps LM Studio; this signal caps Google/Azure
   // too. The message below derives from DEADLINE_MS so it can't drift
   // from the value again.
-  const DEADLINE_MS = 30000;
+  const DEADLINE_MS = Math.min(600, Math.max(30, Number(settings?.translateTimeoutSec) || 120)) * 1000;
   const ctrl = new AbortController();
   const deadlineId = setTimeout(() => ctrl.abort(), DEADLINE_MS);
   try {

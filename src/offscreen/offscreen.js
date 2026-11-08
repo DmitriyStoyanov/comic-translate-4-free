@@ -32,6 +32,7 @@ try {
 // machine uses 4. Firefox is unaffected in practice:
 // SharedArrayBuffer is off there, so ORT still runs single-threaded
 // (thread-info numThreads 1) regardless of core count.
+ort.env.logLevel = 'error'; // silence ORT "nodes not assigned to EP" warnings
 ort.env.wasm.numThreads = Math.max(1, (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4);
 
 // Chrome 2.0.13: measured thread count (ML_BENCH_THREADS). The benchmark
@@ -1010,9 +1011,6 @@ const handlers = {
     try {
       for (const p of patches) totalTiles += tileOrigins(p.width, tileMax).length * tileOrigins(p.height, tileMax).length;
     } catch { totalTiles = 0; }
-    // DIAGNOSTIC (temporary): total work, so the log shows how many
-    // patches the run had (not a guessed count).
-    console.error('[ct-diag] inpaint start run ' + runId + ' patches ' + patches.length);
     // Long inpaints report progress: the Firefox background page sets
     // globalThis.__ctInpaintProgress (same module scope there — see
     // background-ff.js/service-worker.js). The Chrome offscreen document sets

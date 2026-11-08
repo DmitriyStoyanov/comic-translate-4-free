@@ -623,7 +623,7 @@
     const c = document.createElement('canvas');
     c.width = Math.max(1, Math.round(im.naturalWidth * s));
     c.height = Math.max(1, Math.round(im.naturalHeight * s));
-    const cx = c.getContext('2d');
+    const cx = c.getContext('2d', { willReadFrequently: true });
     cx.drawImage(im, 0, 0, c.width, c.height);
     // NOTE: raw pixel buffers CANNOT travel via extension messaging — Chrome
     // silently turns ArrayBuffers into {} in both directions (verified). So
@@ -817,6 +817,8 @@
       if (settings && settings.playDing === false) return; // default on
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) return;
+      // Creating the context before any user gesture triggers Chrome's autoplay warning.
+      if (!dingCtx && navigator.userActivation && !navigator.userActivation.hasBeenActive) return;
       dingCtx = dingCtx || new AC();
       if (dingCtx.state === 'suspended') {
         try { await dingCtx.resume(); } catch { /* stay silent */ }
@@ -1170,7 +1172,7 @@
           const work = document.createElement('canvas');
           work.width = Math.max(1, Math.round(width * rs));
           work.height = Math.max(1, Math.round(height * rs));
-          const wctx = work.getContext('2d');
+          const wctx = work.getContext('2d', { willReadFrequently: true });
           // The inpainted page arrives as a WebP data URL (raw pixel buffers do
           // not survive extension messaging from the service worker).
           const baseImg = new Image();

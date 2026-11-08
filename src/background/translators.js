@@ -66,10 +66,10 @@ export async function ensureLmStudioHostAccess(url) {
   }
 }
 // deadlineMs caps the TOTAL wall time across attempts + backoffs (default
-// 30s — matching the Firefox worker deadline and Chrome's translate
+// 120s — matching the Firefox worker deadline and Chrome's translate
 // abort, so a hung server can't hold the worker past its kill). Callers
-// thread their own deadline: the SW passes 30s on both browser paths.
-async function lmStudioFetch(url, opts, signal, label, deadlineMs = 30000) {
+// thread their own deadline: the SW passes 120s on both browser paths.
+async function lmStudioFetch(url, opts, signal, label, deadlineMs = 120000) {
   const deadline = Date.now() + deadlineMs;
   const backoffs = [1000, 2000, 4000];
   let lastErr = null;
@@ -90,7 +90,7 @@ async function lmStudioFetch(url, opts, signal, label, deadlineMs = 30000) {
       if (signal.aborted) throw Object.assign(new Error('cancelled'), { cancelled: true });
       signal.addEventListener('abort', onAbort, { once: true });
     }
-    const timer = setTimeout(() => ctrl.abort(), Math.min(60000, remaining));
+    const timer = setTimeout(() => ctrl.abort(), Math.min(120000, remaining));
     try {
       const resp = await fetch(url, { ...opts, signal: ctrl.signal });
       clearTimeout(timer);
@@ -789,7 +789,7 @@ function toSentenceCase(t) {
   return t.toLowerCase().replace(/(^|[.!?…]\s+|["«“]\s*)(\p{L})/gu, (m, pre, ch) => pre + ch.toUpperCase());
 }
 
-export async function translateBlocks(blocks, settings, onProgress, signal, deadlineMs = 30000, isUserCancelled) {
+export async function translateBlocks(blocks, settings, onProgress, signal, deadlineMs = 120000, isUserCancelled) {
   const idx = [], texts = [];
   // List-like blocks (ragged entries, e.g. a table of contents) are sent line by
   // line so entries are not merged into one sentence; `spans` maps each block
@@ -868,8 +868,8 @@ export async function translateBlocks(blocks, settings, onProgress, signal, dead
       if (azureConfigured && backend !== 'azure') candidates.push('azure');
       // If the primary died by timeout-abort, the caller's signal is dead:
       // failover attempts on it would die instantly. Rescue on a fresh
-      // signal with its own 20s budget, so stall (30s) + rescue fits
-      // under the caller's 60s backstop. A user cancel during rescue
+      // signal with its own 20s budget, so stall (120s) + rescue fits
+      // under the caller's 180s backstop. A user cancel during rescue
       // still stops it via the loop-top check below.
       const rescueMode = signal?.aborted && !isUserCancelled?.();
       const failoverBudgetMs = rescueMode ? 20000 : deadlineMs;
@@ -887,7 +887,7 @@ export async function translateBlocks(blocks, settings, onProgress, signal, dead
       // the whole deadline, so later backends never got a turn and the
       // overall abort then poisoned their attempts too. Cap each LM Studio
       // failover attempt at 15s and stop when the budget is gone, so Azure
-      // always gets its turn inside the 30s translate budget.
+      // always gets its turn inside the 120s translate budget.
       const FAILOVER_LM_DEADLINE_MS = 15000;
       for (const fb of candidates) {
         const remaining = failoverBudgetMs - (performance.now() - budgetStart);

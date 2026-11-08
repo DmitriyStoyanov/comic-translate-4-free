@@ -60,6 +60,7 @@
     <option value="lmstudio-v1" data-i18n="lmstudio_api_v1">LM Studio REST API v1 (/api/v1/chat)</option>
   </select></div>
   <div class="row"><label data-i18n="lmstudio_key">LM Studio API key (optional)</label><input type="password" id="lmStudioKey" autocomplete="off"></div>
+  <div class="row"><label>Translation timeout (seconds)</label><input type="number" id="translateTimeoutSec" min="30" max="600" step="10"></div>
   <div class="row"><label></label><button id="checkLmStudio" data-i18n="check_lmstudio">Check LM Studio connection</button><span id="lmStudioResult" class="check-result"></span></div>
   <p class="hint" data-i18n="backend_hint">Azure key/region are stored only in this browser's extension storage. LM Studio must be running with its OpenAI-compatible server enabled (default http://127.0.0.1:1234).</p>
 

@@ -11,6 +11,7 @@ export const DEFAULT_SETTINGS = {
   lmStudioUrl: 'http://127.0.0.1:1234', // LM Studio server (bare host:port; flavour adds its path)
   lmStudioKey: '',
   lmStudioApi: 'lmstudio-v1', // 'openai' | 'lmstudio-v1' (LM Studio REST)
+  translateTimeoutSec: 120, // translation deadline (30-600s); slow local LLMs may need more
   lmStudioModelId: '', // auto-managed: loaded model id for the v1 flavour (no UI)
   localLlmModel: 'SmolLM2-1.7B-Instruct-q4f16_1-MLC',
   debugMode: false,

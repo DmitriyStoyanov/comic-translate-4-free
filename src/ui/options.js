@@ -156,6 +156,7 @@ function applyToForm(s) {
   setVal('lmStudioUrl', s.lmStudioUrl || '');
   setVal('lmStudioApi', s.lmStudioApi || 'lmstudio-v1');
   setVal('lmStudioKey', s.lmStudioKey || '');
+  setVal('translateTimeoutSec', s.translateTimeoutSec || DEFAULTS.translateTimeoutSec);
   setVal('threshold', s.detectionThreshold);
   $('thresholdVal').textContent = Number(s.detectionThreshold).toFixed(2);
   setVal('minImageSize', s.minImageSize);
@@ -202,7 +203,7 @@ $('threshold').oninput = e => { $('thresholdVal').textContent = Number(e.target.
 
 // Every control auto-saves; no Save button.
 for (const id of ['sourceLang', 'targetLang', 'backend', 'backendFailover', 'azureKey', 'azureRegion',
-    'lmStudioUrl', 'lmStudioApi', 'lmStudioKey',
+    'lmStudioUrl', 'lmStudioApi', 'lmStudioKey', 'translateTimeoutSec',
     'threshold', 'minImageSize',
     'debugMode', 'autoTranslate', 'playDing']) {
   const el = $(id);
@@ -243,6 +244,7 @@ function collect() {
     lmStudioUrl: $('lmStudioUrl').value.trim() || DEFAULTS.lmStudioUrl,
     lmStudioApi: $('lmStudioApi').value,
     lmStudioKey: $('lmStudioKey').value.trim(),
+    translateTimeoutSec: Math.min(600, Math.max(30, Math.round(Number($('translateTimeoutSec').value)) || DEFAULTS.translateTimeoutSec)),
     detectionThreshold: threshold.ok ? threshold.value : (lastSettings.detectionThreshold ?? DEFAULTS.detectionThreshold),
     minImageSize: minImg.ok ? Math.round(minImg.value) : (lastSettings.minImageSize ?? DEFAULTS.minImageSize),
     debugMode: $('debugMode').checked,
