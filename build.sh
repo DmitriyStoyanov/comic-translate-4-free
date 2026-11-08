@@ -60,7 +60,8 @@ build_one() {
     cp "$SRC/manifest.firefox.json" "$outdir/manifest.json"
   fi
   # BUILD in this copy = this browser's manifest version (footer + cache key).
-  sed -i "s/const BUILD = '[^']*'/const BUILD = '$version'/" "$outdir/src/shared/version.js"
+  sed -i.bak "s/const BUILD = '[^']*'/const BUILD = '$version'/" "$outdir/src/shared/version.js"
+  rm -f "$outdir/src/shared/version.js.bak"
   python3 - <<EOF
 import json
 m = json.load(open('$outdir/manifest.json'))
