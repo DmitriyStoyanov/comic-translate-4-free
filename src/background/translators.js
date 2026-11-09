@@ -481,31 +481,42 @@ async function lmStudio(texts, settings, signal, deadlineMs) {
   // Ollama and other strict OpenAI-compatible servers reject a request with no
   // `model` ("model is required"); LM Studio tolerates it. Send the remembered
   // id, else the first model the server lists.
-  let modelId = (settings.lmStudioModelId || '').trim();
-  if (!modelId) {
+  const discover = async () => {
     try {
       const mr = await lmStudioFetch(ep.models, { headers }, signal, 'model discovery', Math.min(deadlineMs || 10000, 10000));
       const mj = await mr.json();
-      modelId = ((mj && mj.data && mj.data[0] && mj.data[0].id) || '').trim();
-      if (modelId) { try { await updateSettingsField('lmStudioModelId', modelId); } catch { /* best-effort */ } }
-    } catch (e) { if (e && e.cancelled) throw e; /* no listing: send without a model, as before */ }
+      const id = ((mj && mj.data && mj.data[0] && mj.data[0].id) || '').trim();
+      if (id) { try { await updateSettingsField('lmStudioModelId', id); } catch { /* best-effort */ } }
+      return id;
+    } catch (e) { if (e && e.cancelled) throw e; return ''; /* no listing: send without a model, as before */ }
+  };
+  const send = async (modelId) => {
+    if (modelId) body.model = modelId; else delete body.model;
+    let resp;
+    try {
+      resp = await lmStudioFetch(ep.chat, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+      }, signal, 'chat', deadlineMs);
+    } catch (e) {
+      if (e && e.cancelled) throw e;
+      throw new Error('LM Studio: cannot reach ' + ep.chat + ' (' + ep.label + ') — is the server running? (' + String(e).slice(0, 100) + ')');
+    }
+    // Read as text, not res.json(): the reply is not reliably JSON, an error
+    // status carries the real reason in its body, and json() consumes the stream
+    // even when the parse then throws.
+    return { resp, bodyText: await resp.text().catch(() => '') };
+  };
+  const remembered = (settings.lmStudioModelId || '').trim();
+  const initial = remembered || await discover();
+  let { resp, bodyText } = await send(initial);
+  // The remembered model may have been removed/swapped on the server (404
+  // "model not found"): re-learn the current one once and retry.
+  if (!resp.ok && remembered && (resp.status === 404 || /model/i.test(bodyText) && resp.status === 400)) {
+    const fresh = await discover();
+    if (fresh && fresh !== remembered) ({ resp, bodyText } = await send(fresh));
   }
-  if (modelId) body.model = modelId;
-  let resp;
-  try {
-    resp = await lmStudioFetch(ep.chat, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-    }, signal, 'chat', deadlineMs);
-  } catch (e) {
-    if (e && e.cancelled) throw e;
-    throw new Error('LM Studio: cannot reach ' + ep.chat + ' (' + ep.label + ') — is the server running? (' + String(e).slice(0, 100) + ')');
-  }
-  // Read as text, not res.json(): the reply is not reliably JSON, an error
-  // status carries the real reason in its body, and json() consumes the stream
-  // even when the parse then throws.
-  const bodyText = await resp.text().catch(() => '');
   if (!resp.ok) {
     throw new Error(`LM Studio: HTTP ${resp.status} — ${bodyText.slice(0, 160) || 'check the server URL'}`);
   }
