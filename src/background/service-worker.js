@@ -4,6 +4,9 @@
 import { MSG } from '../shared/contracts.js';
 import { MODEL_GROUPS, getModelStatus, deleteModelGroup, computeModelFingerprint } from '../shared/model-specs.js';
 import { getSettings } from '../shared/settings.js';
+
+// User-configurable translation deadline (seconds, clamped 30-600), in ms.
+const translateDeadlineMs = (s) => Math.min(600, Math.max(30, Number(s?.translateTimeoutSec) || 120)) * 1000;
 import {
   makeTextBlock, mergeOverlappingBoxes, sortBlocks,
   boxIoU, clampBox, dedupAndMergeSeams, mergeBoxesByCost,
@@ -14,6 +17,7 @@ import { pixelPut, pixelTake, pixelDrop, pixelPruneRun } from '../shared/pixel-b
 import { generateMask, flatFillMasked } from '../shared/mask.js';
 import { translateBlocks, checkAzure, checkLmStudio, BACKEND_LABEL, BACKEND_SHORT_LABEL } from './translators.js';
 import { detectPageLang } from '../shared/lang-detect.js';
+import { fixItalianText, isBrandText, shouldSkipItalianBlock } from '../shared/it-postprocess.js';
 import { estimateBlockStyle, refineTitleBand } from '../shared/style.js';
 import { mlHostAlive, ensureMlHost, callMl, cancelMlForRun, runPooledInpaint, cancelPooledInpaint, largestPatchAreaShare, runGpuInpaint, cancelGpuInpaint, runChromeGpuInpaint, cancelChromeGpuInpaint, notifyChromeGpuProgress, makeCanvas, canvasToBlob, directHandlers, WEBP_TYPE, WEBP_QUALITY, setMlAlarmRecoveryHook } from './ml-bridge.js';
 import {
@@ -247,7 +251,7 @@ function bitmapToRGBA(bmp, maxPixels = CAPTURE_MAX_PIXELS) {
   const w = Math.max(1, Math.round(bmp.width * scale));
   const h = Math.max(1, Math.round(bmp.height * scale));
   const canvas = makeCanvas(w, h);
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(bmp, 0, 0, w, h);
   bmp.close();
   const img = ctx.getImageData(0, 0, w, h);
@@ -869,14 +873,14 @@ async function renderFromTier1(tabId, runId, tier1Entry, tier2Key, settings, tim
     effSettings = { ...settings, sourceLang: resolved || 'ja' };
   }
   const runController = runs.get(runId)?.abortController || new AbortController();
-  // Tier-1 translate needs its own 30s abort (the full pipeline has one;
+  // Tier-1 translate needs its own 120s abort (the full pipeline has one;
   // this path had none, so a stalled backend hung forever). Local
   // controller: aborting the run's controller would trip the
   // checkCancelled below even after a rescued translation.
   const translateController = new AbortController();
   if (runController.signal?.aborted) { try { translateController.abort(); } catch {} }
   else runController.signal?.addEventListener('abort', () => { try { translateController.abort(); } catch {} }, { once: true });
-  const tier1TimeoutId = setTimeout(() => { try { translateController.abort(); } catch {} }, 30000);
+  const tier1TimeoutId = setTimeout(() => { try { translateController.abort(); } catch {} }, translateDeadlineMs(settings));
   const failoverNotice = (p) => {
     if (p && p.failoverFrom && p.failoverTo) {
       chrome.tabs.sendMessage(tabId, {
@@ -888,7 +892,7 @@ async function renderFromTier1(tabId, runId, tier1Entry, tier2Key, settings, tim
   };
   let translated;
   try {
-    translated = await translateBlocks(blocks, effSettings, failoverNotice, translateController.signal, 30000, () => runs.get(runId)?.cancelled === true);
+    translated = await translateBlocks(blocks, effSettings, failoverNotice, translateController.signal, translateDeadlineMs(settings), () => runs.get(runId)?.cancelled === true);
   } finally {
     clearTimeout(tier1TimeoutId);
   }
@@ -1195,6 +1199,19 @@ async function runPipeline(tabId, opts = {}) {
         ocrMs = r.ms;
         ocrEngineLabel = (MODEL_GROUPS.find(g => g.id === r.engine) || {}).label || r.engine || '';
         for (const res of r.results) {
+          // Italian: repair glued words and lost accents before anything reads
+          // the text (translation, language vote, title-case handling below).
+          if (settings.sourceLang === 'it' && res.text) {
+            res.text = fixItalianText(res.text);
+            if (Array.isArray(res.textLines)) res.textLines = res.textLines.map(fixItalianText);
+            if (Array.isArray(res.bands)) res.bands.forEach(b => { b.text = fixItalianText(b.text); });
+          }
+          // Logos (Walt Disney…) and unreadable lettering stay as printed:
+          // empty text means the block is neither translated nor erased.
+          if (settings.sourceLang === 'it' && res.text && shouldSkipItalianBlock(res.text, blocks[res.id].text_class)) {
+            diagPush('ocr skip block ' + res.id + (isBrandText(res.text) ? ' (brand)' : ' (unreadable)') + ': ' + JSON.stringify(res.text.slice(0, 60)));
+            res.text = ''; res.textLines = null; res.bands = null; res.chars = 0;
+          }
           blocks[res.id].text = res.text;
           blocks[res.id].text_lines = Array.isArray(res.textLines) && res.textLines.length > 1 ? res.textLines : null;
           // Display lettering read by the band search (a title over artwork):
@@ -1302,12 +1319,12 @@ async function runPipeline(tabId, opts = {}) {
     const runTranslate = async () => {
       parProgress('translate', 0);
       const t0t = performance.now();
-      // 30s aborts the CURRENT attempt so translateBlocks can fail over:
+      // 120s aborts the CURRENT attempt so translateBlocks can fail over:
       // rejecting the race directly used to bypass failover entirely, so a
-      // stalled backend never switched to Azure. The 60s backstop kills a
-      // run wedged past stall (30s) + rescue (20s).
-      const TRANSLATE_TIMEOUT_MS = 30000;
-      const TRANSLATE_BACKSTOP_MS = 60000;
+      // stalled backend never switched to Azure. The 180s backstop kills a
+      // run wedged past stall (120s) + rescue (20s).
+      const TRANSLATE_TIMEOUT_MS = translateDeadlineMs(settings);
+      const TRANSLATE_BACKSTOP_MS = TRANSLATE_TIMEOUT_MS + 60000;
       let timeoutId = null, backstopId = null;
       timeoutId = setTimeout(() => {
         try { abortController.abort(); } catch { /* already aborted */ }
@@ -1329,7 +1346,7 @@ async function runPipeline(tabId, opts = {}) {
           }
         };
         translated = await Promise.race([
-          translateBlocks(blocks, effSettings, failoverNotice, abortController.signal, 30000, () => runs.get(runId)?.cancelled === true),
+          translateBlocks(blocks, effSettings, failoverNotice, abortController.signal, translateDeadlineMs(settings), () => runs.get(runId)?.cancelled === true),
           backstopP,
         ]);
       } finally {
@@ -1652,14 +1669,14 @@ async function runPipeline(tabId, opts = {}) {
       runs.get(runId).killTranslateWorker = killTranslateWorker;
       const translateP = new Promise((resolve, reject) => {
         translateReject = reject;
-        // 60s backstop only: the worker's own 30s abort triggers failover
-        // inside translateBlocks, and stall (30s) + rescue (20s) needs up
-        // to ~50s — a 30s kill here would murder the rescue.
+        // 180s backstop only: the worker's own 120s abort triggers failover
+        // inside translateBlocks, and stall (120s) + rescue (20s) needs up
+        // to ~140s — a 120s kill here would murder the rescue.
         translateTimeout = setTimeout(() => {
           translateTimeout = null;
           tWorker.terminate();
           reject(new Error('translate worker timeout'));
-        }, 60000);
+        }, translateDeadlineMs(settings) + 60000);
         tWorker.onmessage = (e) => {
           // Failover notices arrive before the final ok/error — show a pill
           // but don't settle the promise.

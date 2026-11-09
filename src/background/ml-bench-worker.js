@@ -69,7 +69,7 @@ async function loadModel(db, idbGet, readChunked, id) {
   else if (rec.chunks) bytes = await readChunked(db, id, rec);
   else throw new Error('cached model "' + id + '" is corrupt');
   const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  return ort.InferenceSession.create(u8, { executionProviders: ['wasm'] });
+  return ort.InferenceSession.create(u8, { executionProviders: ['wasm'], logSeverityLevel: 3 });
 }
 
 function median(xs) {

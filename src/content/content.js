@@ -110,6 +110,78 @@
     return area;
   }
 
+  // Pull a speech balloon's render rectangle back from artwork that pokes into
+  // it (a character's beak or hand overlapping the cloud). The rectangle is the
+  // balloon's bounding box shrunk by a fixed share, which ignores the balloon's
+  // real outline. Pixels are read from the canvas, where the page has already
+  // been inpainted: a cell is "foreign" when its colour is far from the area's
+  // median (the balloon fill) and not dark (outlines and other text are dark).
+  // Edges are then moved inward one cell at a time, always the edge whose strip
+  // holds the most foreign cells per cell lost, until every strip is clean or
+  // the rectangle would drop below 60% of its width or height.
+  function avoidArtwork(ctx, area) {
+    try {
+      const s = (ctx.getTransform && ctx.getTransform().a) || 1;
+      const [x1, y1, x2, y2] = area;
+      const W = x2 - x1, H = y2 - y1;
+      if (W < 60 || H < 30) return area;
+      const cell = Math.max(3, Math.round(Math.min(W, H) / 36));
+      const gw = Math.floor(W / cell), gh = Math.floor(H / cell);
+      if (gw < 6 || gh < 4) return area;
+      const px0 = Math.round(x1 * s), py0 = Math.round(y1 * s);
+      const pw = Math.max(1, Math.round(gw * cell * s)), ph = Math.max(1, Math.round(gh * cell * s));
+      const img = ctx.getImageData(px0, py0, pw, ph);
+      const rgb = [];
+      for (let gy = 0; gy < gh; gy++) {
+        for (let gx = 0; gx < gw; gx++) {
+          const sx = Math.min(pw - 1, Math.round((gx + 0.5) * cell * s)), sy = Math.min(ph - 1, Math.round((gy + 0.5) * cell * s));
+          const i = (sy * pw + sx) * 4;
+          rgb.push([img.data[i], img.data[i + 1], img.data[i + 2]]);
+        }
+      }
+      const med = [0, 1, 2].map(c => { const v = rgb.map(p => p[c]).sort((a, b) => a - b); return v[v.length >> 1]; });
+      const raw = rgb.map(p => {
+        const lum = 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
+        if (lum < 80) return 0;
+        // Grey anti-aliasing of text and outlines has no saturation; artwork does.
+        if (Math.max(p[0], p[1], p[2]) - Math.min(p[0], p[1], p[2]) < 45) return 0;
+        return Math.hypot(p[0] - med[0], p[1] - med[1], p[2] - med[2]) > 70 ? 1 : 0;
+      });
+      // Keep a one-cell gap around artwork: text is drawn with an outline stroke.
+      const foreign = raw.slice();
+      for (let gy = 0; gy < gh; gy++) {
+        for (let gx = 0; gx < gw; gx++) {
+          if (!raw[gy * gw + gx]) continue;
+          for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+            const yy = gy + dy, xx = gx + dx;
+            if (yy >= 0 && yy < gh && xx >= 0 && xx < gw) foreign[yy * gw + xx] = 1;
+          }
+        }
+      }
+      let l = 0, t = 0, r = gw, b = gh;
+      const minW = Math.ceil(gw * 0.6), minH = Math.ceil(gh * 0.6);
+      const count = (edge) => {
+        let n = 0, len = 0;
+        if (edge === 0 || edge === 1) { const y = edge === 0 ? t : b - 1; for (let x = l; x < r; x++) { n += foreign[y * gw + x]; len++; } }
+        else { const x = edge === 2 ? l : r - 1; for (let y = t; y < b; y++) { n += foreign[y * gw + x]; len++; } }
+        return [n, len];
+      };
+      for (let guard = gw + gh; guard > 0; guard--) {
+        let best = -1, bestRatio = 0.03;
+        for (let e = 0; e < 4; e++) {
+          if ((e < 2 && b - t <= minH) || (e >= 2 && r - l <= minW)) continue;
+          const [n, len] = count(e);
+          if (len && n / len > bestRatio) { best = e; bestRatio = n / len; }
+        }
+        if (best < 0) break;
+        if (best === 0) t++; else if (best === 1) b--; else if (best === 2) l++; else r--;
+      }
+      return [x1 + l * cell, y1 + t * cell, x1 + r * cell, y1 + b * cell];
+    } catch {
+      return area; // tainted canvas or no pixel access: keep the plain rectangle
+    }
+  }
+
   const isCJK = s => /[\u3040-\u30ff\u4e00-\u9faf\uac00-\ud7af]/.test(s);
 
   // maxW is a number, or a function of the line index (lines next to artwork
@@ -201,6 +273,14 @@
       const wOf = (k) => (widthAt ? widthAt(k, lh) : rw);
       let fitsW = true;
       for (let k = 0; k < lines.length; k++) if (ctx.measureText(lines[k]).width > wOf(k) + 0.5) { fitsW = false; break; }
+      // A word wider than the line gets char-broken ("ПОМОГИТ" / "Е!"), which
+      // reads worse than a smaller font: such a size does not fit. The break
+      // is still the fallback at the minimum size (below).
+      if (fitsW && !isCJK(text)) {
+        let narrow = Infinity;
+        for (let k = 0; k < Math.max(1, lines.length); k++) narrow = Math.min(narrow, wOf(k));
+        for (const w of text.split(/\s+/)) if (w && ctx.measureText(w).width > narrow + 0.5) { fitsW = false; break; }
+      }
       return { ok: lines.length * lh <= rh && fitsW, lines, lh };
     };
     let best = null;
@@ -343,6 +423,10 @@
     curHardBreaks = !!block.list_like && text.includes('\n');
     curWeight = block.font_weight === 'bold' ? 'bold' : 'normal';
     curFamily = block.font_family === 'serif' ? 'serif' : 'sans';
+    // Sound effects and shouts ("УХ!", "УРГ!") are short free-standing lettering:
+    // bold sans reads like comic lettering; the serif the stroke-contrast test
+    // picks for big display letters does not.
+    if (block.text_class !== 'text_bubble' && text.replace(/[^\p{L}\p{N}]/gu, '').length <= 6) { curFamily = 'sans'; curWeight = 'bold'; }
     lhK = 1.18 * Math.max(0.9, Math.min(1.35, block.line_spacing || 1));
     // Long free-standing text (magazine columns, synopsis) is a paragraph:
     // left-aligned and top-anchored like the source, not centered like a bubble.
@@ -352,8 +436,8 @@
     // source renders left-aligned. Falls back to the paragraph/center rule.
     const measured = block.src_lines >= 3 ? block.alignment : null;
     const align = measured ? (measured === 'justify' ? 'left' : measured) : (paragraph ? 'left' : 'center');
-    const area = renderAreaFor(block, srcLang);
     const realBubble = isRealBubble(block);
+    const area = realBubble ? avoidArtwork(ctx, renderAreaFor(block, srcLang)) : renderAreaFor(block, srcLang);
     const [x1, y1, x2, y2] = area;
     const rw = Math.max(8, x2 - x1), rh = Math.max(8, y2 - y1);
     const vertical = isCJK(text) && rh > rw * 1.5;
@@ -362,7 +446,7 @@
     // is approximate (box area + char count), so 1.2x gives headroom to reach
     // the original size. fitFont then shrinks until it fits the box.
     // Capped by maxSize, floored by minSize — "not too big nor too small".
-    const startSize = Math.min(maxSize, Math.max(minSize, autoSize * 1.2));
+    const startSize = Math.min(block._capSize || maxSize, maxSize, Math.max(minSize, autoSize * 1.2));
     // Wrap-around: source lines that were indented around artwork (left-aligned
     // columns only). indentAt(yMid, lh) = the indent of any source line band that
     // overlaps this text line; the line is shifted right and narrowed by it.
@@ -551,7 +635,7 @@
     const c = document.createElement('canvas');
     c.width = Math.max(1, Math.round(im.naturalWidth * s));
     c.height = Math.max(1, Math.round(im.naturalHeight * s));
-    const cx = c.getContext('2d');
+    const cx = c.getContext('2d', { willReadFrequently: true });
     cx.drawImage(im, 0, 0, c.width, c.height);
     // NOTE: raw pixel buffers CANNOT travel via extension messaging — Chrome
     // silently turns ArrayBuffers into {} in both directions (verified). So
@@ -745,6 +829,8 @@
       if (settings && settings.playDing === false) return; // default on
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) return;
+      // Creating the context before any user gesture triggers Chrome's autoplay warning.
+      if (!dingCtx && navigator.userActivation && !navigator.userActivation.hasBeenActive) return;
       dingCtx = dingCtx || new AC();
       if (dingCtx.state === 'suspended') {
         try { await dingCtx.resume(); } catch { /* stay silent */ }
@@ -1098,7 +1184,7 @@
           const work = document.createElement('canvas');
           work.width = Math.max(1, Math.round(width * rs));
           work.height = Math.max(1, Math.round(height * rs));
-          const wctx = work.getContext('2d');
+          const wctx = work.getContext('2d', { willReadFrequently: true });
           // The inpainted page arrives as a WebP data URL (raw pixel buffers do
           // not survive extension messaging from the service worker).
           const baseImg = new Image();
@@ -1119,6 +1205,40 @@
           const renderInfo = [];
           // Bundled fonts first; any failure just means the system stack is used.
           try { await ensureFonts(blocks); } catch { /* fall back */ }
+          // Pass 1 measures the font size each block settles on; neighbouring
+          // bubbles of one scene (three "Help!" cries) are then capped to a common
+          // size so the page does not mix 8px and 12px lettering. Pass 2 redraws
+          // from the clean page.
+          for (const b of blocks) { b._capSize = null; }
+          try {
+            const sizes = new Map();
+            for (const b of blocks) { const i0 = drawBlock(wctx, b, srcLang, maxSize, minSize); if (i0) sizes.set(b, i0.render_font_size); }
+            const bub = blocks.filter(b => sizes.has(b) && b.text_class === 'text_bubble' && b.xyxy);
+            const near = (a, c) => {
+              const ha = a.xyxy[3] - a.xyxy[1], hc = c.xyxy[3] - c.xyxy[1];
+              const gx = Math.max(0, Math.max(a.xyxy[0], c.xyxy[0]) - Math.min(a.xyxy[2], c.xyxy[2]));
+              const gy = Math.max(0, Math.max(a.xyxy[1], c.xyxy[1]) - Math.min(a.xyxy[3], c.xyxy[3]));
+              return gx <= Math.max(ha, hc) * 2 && gy <= Math.max(ha, hc) * 2;
+            };
+            const seen = new Set();
+            for (const b of bub) {
+              if (seen.has(b)) continue;
+              const group = [b]; seen.add(b);
+              for (let gi = 0; gi < group.length; gi++) for (const c of bub) {
+                if (seen.has(c) || !near(group[gi], c)) continue;
+                const r = sizes.get(c) / sizes.get(group[gi]);
+                if (r < 0.6 || r > 1.67) continue;   // clearly different lettering (shout vs whisper)
+                seen.add(c); group.push(c);
+              }
+              if (group.length < 2) continue;
+              const vals = group.map(g => sizes.get(g));
+              const cap = Math.max(Math.min(...vals), Math.max(...vals) * 0.8);
+              for (const g of group) g._capSize = cap;
+            }
+            wctx.save(); wctx.setTransform(1, 0, 0, 1, 0, 0);
+            wctx.drawImage(baseImg, 0, 0, work.width, work.height);
+            wctx.restore();
+          } catch { /* sizing pass is cosmetic: fall through to a plain draw */ }
           for (const b of blocks) {
             const info = drawBlock(wctx, b, srcLang, maxSize, minSize);
             if (info) {

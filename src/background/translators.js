@@ -1,6 +1,7 @@
 // Translation backends. translateBlocks(blocks, settings) -> aligned [string].
 // Empty source texts map to empty translations. Throws with a human message.
 import { LANGS, TARGET_LANGS, updateSettingsField } from '../shared/settings.js';
+import { fixRussianAgreement } from '../shared/ru-postprocess.js';
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 // Abort-aware sleep: rejects immediately on cancel instead of waiting out
@@ -66,10 +67,10 @@ export async function ensureLmStudioHostAccess(url) {
   }
 }
 // deadlineMs caps the TOTAL wall time across attempts + backoffs (default
-// 30s — matching the Firefox worker deadline and Chrome's translate
+// 120s — matching the Firefox worker deadline and Chrome's translate
 // abort, so a hung server can't hold the worker past its kill). Callers
-// thread their own deadline: the SW passes 30s on both browser paths.
-async function lmStudioFetch(url, opts, signal, label, deadlineMs = 30000) {
+// thread their own deadline: the SW passes 120s on both browser paths.
+async function lmStudioFetch(url, opts, signal, label, deadlineMs = 120000) {
   const deadline = Date.now() + deadlineMs;
   const backoffs = [1000, 2000, 4000];
   let lastErr = null;
@@ -90,7 +91,7 @@ async function lmStudioFetch(url, opts, signal, label, deadlineMs = 30000) {
       if (signal.aborted) throw Object.assign(new Error('cancelled'), { cancelled: true });
       signal.addEventListener('abort', onAbort, { once: true });
     }
-    const timer = setTimeout(() => ctrl.abort(), Math.min(60000, remaining));
+    const timer = setTimeout(() => ctrl.abort(), Math.min(120000, remaining));
     try {
       const resp = await fetch(url, { ...opts, signal: ctrl.signal });
       clearTimeout(timer);
@@ -355,12 +356,113 @@ function lmStudioPrompt(texts, settings) {
   const n = texts.length;
   const from = langName(settings.sourceLang);
   const to = langName(settings.targetLang);
-  return 'Translate the following ' + n + ' text(s) from ' + from + ' to ' + to +
-    '. Reply with ONLY a JSON array of ' + n +
+  // The texts are the bubbles and captions of ONE comic page in reading order.
+  // Telling the model so lets it keep names, tone and running jokes consistent
+  // and translate idioms by meaning; without it each bubble is rendered as an
+  // isolated, literal sentence.
+  let context = ' The texts are the speech bubbles and captions of one comic page, in reading order: use the whole' +
+    ' page as context and keep names and tone consistent. Translate as a native comic translator would —' +
+    ' idioms by meaning rather than word for word, exclamations short and lively, verse rhythmic and rhymed' +
+    ' where possible. The source was read by OCR and may contain small errors: translate what was meant.' +
+    ' Do not translate logos or brand names. Use «» for quotation marks.' +
+    // A sentence is often split over several consecutive bubbles; translated one
+    // by one each half loses its meaning (a dropped "sick", a dangling "it must be").
+    ' A sentence may continue across consecutive texts or be split between speakers: read the neighbours first,' +
+    ' translate the whole thought, then give each text its own natural part, never dropping a word of meaning.' +
+    // Small models slip on case/gender agreement; the same key word must also
+    // stay the same word across the page (a gag often hangs on it).
+    ' Check grammatical agreement (gender, case, number) in the finished sentences and use the same word for the' +
+    ' same thing throughout the page.' +
+    // Russian runs 15-25% longer than Italian and bubbles do not grow, so the
+    // renderer would have to shrink the type or break words.
+    ' Bubbles are small, so prefer short natural phrasing over a literal long one — but translate EVERY sentence' +
+    ' and clause of every text to the end: never stop early, summarise or leave out the last part of a long text.';
+  const glossary = comicGlossary(settings.sourceLang, settings.targetLang);
+  if (glossary) context += ' Use these established names: ' + glossary + '.';
+  const hints = idiomHints(texts, settings.sourceLang, settings.targetLang);
+  if (hints) context += ' Idioms in this page: ' + hints + '.';
+  const frag = fragmentNote(texts);
+  if (frag) context += ' ' + frag;
+  const shots = FEW_SHOT[from_to(settings)];
+  if (shots) context += ' ' + shots;
+  if (settings.lmKeyed) {
+    // Keyed form: an entry keeps its number even if the model merges or skips
+    // one, so a short answer cannot shift the pairing.
+    const obj = {};
+    texts.forEach((t, i) => { obj[String(i + 1)] = t; });
+    return 'Translate the following ' + n + ' text(s) from ' + from + ' to ' + to + '.' + context +
+      ' Reply with ONLY a JSON object with the same keys ("1".."' + n + '") and the translated strings as values,' +
+      ' no explanations, no code fences. Translate every key, even if two texts look alike.' +
+      '\n' + JSON.stringify(obj);
+  }
+  return 'Translate the following ' + n + ' text(s) from ' + from + ' to ' + to + '.' + context +
+    ' Reply with ONLY a JSON array of ' + n +
     ' translated strings, in the same order, no explanations, no code fences.' +
     ' Do not analyse the text and do not think step by step: output the array' +
     ' itself as your very first characters, then stop.' +
     '\n' + JSON.stringify(texts);
+}
+
+// Established character names per language pair (Disney comics).
+const COMIC_GLOSSARY = {
+  'it>ru': 'Paperino = Дональд Дак; Paperone = Скрудж Макдак; Topolino = Микки Маус; Minni = Минни; Pippo = Гуфи;' +
+    ' lo zio Paperino = дядя Дональд; Paperina = Дейзи; Qui, Quo, Qua = Билли, Вилли и Дилли; Nonna Papera = бабушка Дак; Gastone = Гладстон',
+};
+// Short texts without closing punctuation ("Dev'essere", "Lo zio Paperino") are
+// pieces of a sentence that the comic spreads over several bubbles, not always
+// in the order the page was read in. Naming them lets the model reassemble the
+// thought before it translates.
+function fragmentNote(texts) {
+  const idx = [];
+  texts.forEach((t, i) => {
+    const s = (t || '').trim();
+    if (s && s.split(/\s+/).length <= 4 && !/[.!?…»"”]$/.test(s)) idx.push(i + 1);
+  });
+  if (!idx.length) return '';
+  return 'Texts ' + idx.join(', ') + ' have no closing punctuation: each is the start or middle of a sentence continued in' +
+    ' another nearby text (often a short exclamation such as "…gravely ill!"), possibly listed out of order.' +
+    ' Reassemble the sentence first, then split the translation back so every text gets its own part.';
+}
+const from_to = (settings) => settings.sourceLang + '>' + settings.targetLang;
+// Worked examples (invented, not from any page) for the failure modes seen in
+// practice: a sentence split over two bubbles, and gender agreement.
+const FEW_SHOT = {
+  'it>ru': 'Examples of the expected quality: "Se quello era il tuo piano" + "non è stato un successo!" →' +
+    ' «Если это и был твой план…» + «то удался он не слишком!» (one thought over two bubbles; "план" is masculine: «твой»);' +
+    ' "Dev\'essere stanchissimo!" → «Он, наверное, совсем без сил!» (not a literal «Это должно быть…»).',
+};
+// Idioms a small model renders word for word, with their Russian meaning;
+// only the ones present on the page are added to the prompt.
+const IDIOM_HINTS = {
+  'it>ru': [
+    [/pel(o)? nell'uovo/i, '"cercare il pelo nell\'uovo" = придираться к мелочам, искать недостатки (not literal hairs in an egg)'],
+    [/miel(e)? nel favo/i, '"cercare il miele nel favo" = искать там, где всё и так есть, ждать лёгкой наживы'],
+    [/il sottoscritto/i, '"il sottoscritto" = the speaker himself, "ваш покорный слуга" / "я, нижеподписавшийся" in jest'],
+    [/anno nuovo,? vita nuova/i, '"Anno nuovo, vita nuova!" = proverb «Новый год — новая жизнь!»'],
+    [/\bè vecchio\b/i, '"È vecchio!" = it is old / stale news, exclaimed: «Старо!» or «Это старо!» (neuter, not «старый»)'],
+    [/chi cerca trova/i, '"chi cerca trova" = «кто ищет, тот найдёт»'],
+    [/sorpres/i, '"sorpresa" = «сюрприз» (masculine: «твой сюрприз», «это был не сюрприз»); use this one word every time, also for "riservare una sorpresa" = «приготовить сюрприз», not a verb like «поудивлю»'],
+    [/tutto miele/i, '"diventare tutto miele" = become sugary-sweet, suddenly all kindness: «стать сама любезность» / «опять сладок, как мёд»'],
+    [/si frena/i, '"si frena" = holds himself back: «сдерживается», «берёт себя в руки»'],
+    [/dev['’]?essere/i, '"dev\'essere" = «должно быть» / «наверное»; "Lo zio Paperino" + "Dev\'essere" + "Gravemente malato!" are ONE sentence over three bubbles = «Дядя Дональд, / наверное, / тяжело болен!»'],
+    [/\bgravemente\b/i, '"gravemente" = «тяжело» (тяжело болен), not «очень плохо»'],
+    [/\bregali\b/i, '"regali" = «подарки»'],
+    [/scalogn/i, '"scalognato" = «невезучий» (unlucky), NOT «бедный»'],
+    [/numero fausto/i, '"numero fausto" = «счастливое число»; "finisce per 7" = «заканчивается на семёрку» — keep the digit 7 in the sentence'],
+    [/ancora una volta/i, '"ancora una volta" = «снова» / «ещё раз» (once more); do not add «однажды»'],
+    [/taccagn/i, '"taccagno" = «скупой», «скряга»'],
+    [/\bnel (19|20)\d\d\b/i, '"Nel 1957" opens a sentence: «В 1957 году…»; keep the year inside the sentence, do not repeat it at the end'],
+  ],
+};
+function idiomHints(texts, src, dst) {
+  const list = IDIOM_HINTS[src + '>' + dst];
+  if (!list) return '';
+  const all = texts.join(' ');
+  return list.filter(([re]) => re.test(all)).map(([, h]) => h).join('; ');
+}
+
+function comicGlossary(src, dst) {
+  return COMIC_GLOSSARY[src + '>' + dst] || '';
 }
 
 async function lmStudio(texts, settings, signal, deadlineMs) {
@@ -371,11 +473,24 @@ async function lmStudio(texts, settings, signal, deadlineMs) {
   if (ep.flavor === 'lmstudio-v1') return lmStudioV1(texts, settings, ep, headers, signal, deadlineMs);
   const body = {
     messages: [{ role: 'user', content: lmStudioPrompt(texts, settings) }],
-    temperature: 0,
+    temperature: settings.lmTemperature || 0,
     texts,
     target: settings.targetLang,
   };
   if (settings.sourceLang && settings.sourceLang !== 'auto') body.source = settings.sourceLang;
+  // Ollama and other strict OpenAI-compatible servers reject a request with no
+  // `model` ("model is required"); LM Studio tolerates it. Send the remembered
+  // id, else the first model the server lists.
+  let modelId = (settings.lmStudioModelId || '').trim();
+  if (!modelId) {
+    try {
+      const mr = await lmStudioFetch(ep.models, { headers }, signal, 'model discovery', Math.min(deadlineMs || 10000, 10000));
+      const mj = await mr.json();
+      modelId = ((mj && mj.data && mj.data[0] && mj.data[0].id) || '').trim();
+      if (modelId) { try { await updateSettingsField('lmStudioModelId', modelId); } catch { /* best-effort */ } }
+    } catch (e) { if (e && e.cancelled) throw e; /* no listing: send without a model, as before */ }
+  }
+  if (modelId) body.model = modelId;
   let resp;
   try {
     resp = await lmStudioFetch(ep.chat, {
@@ -408,7 +523,7 @@ async function lmStudioV1(texts, settings, ep, headers, signal, deadlineMs) {
       return await lmStudioFetch(ep.chat, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ model: modelId, input, temperature: 0 }),
+        body: JSON.stringify({ model: modelId, input, temperature: settings.lmTemperature || 0 }),
       }, signal, 'v1 chat', deadlineMs);
     } catch (e) {
       if (e && e.cancelled) throw e;
@@ -480,6 +595,34 @@ function lmExtractJsonArray(raw, expected) {
     }
   }
   return exact || best;
+}
+
+// Last resort for an array whose strings contain unescaped inner quotes
+// (verse quoting a motto: ["... "ANNO NUOVO!"", "Фу!"]). Entries are split at
+// the quote-comma-quote boundaries; only accepted when the count is exact.
+function lmRepairArray(raw, expected) {
+  if (typeof expected !== 'number') return null;
+  const a = raw.indexOf('['), b = raw.lastIndexOf(']');
+  if (a < 0 || b <= a) return null;
+  let body = raw.slice(a + 1, b).trim();
+  if (!body.startsWith('"') || !body.endsWith('"')) return null;
+  body = body.slice(1, -1);
+  const parts = body.split(/"\s*,\s*"/);
+  if (parts.length !== expected) return null;
+  return parts.map(p => p.replace(/\\(["\\])/g, '$1').replace(/\\n/g, '\n').trim());
+}
+
+// Second last resort: the model answered one translation per line (optionally
+// numbered or bulleted, optionally quoted) instead of a JSON array. Accepted
+// only when the line count matches exactly.
+function lmRepairLines(raw, expected) {
+  if (typeof expected !== 'number' || expected < 1) return null;
+  const lines = raw.replace(/```[a-z]*/gi, '').split('\n')
+    .map(l => l.trim().replace(/^(?:\d+[.)]|[-*•])\s+/, '').replace(/^["«]\s*/, '').replace(/\s*["»],?$/, '').trim())
+    .filter(l => l && l !== '[' && l !== ']');
+  // An introductory "Here is the translation:" line is not an entry.
+  if (lines.length === expected + 1 && /:$/.test(lines[0])) lines.shift();
+  return lines.length === expected ? lines : null;
 }
 
 // Pull the assistant's ANSWER out of a chat envelope, or null when this is
@@ -554,12 +697,18 @@ function lmNormalizeTranslations(data, expected) {
   if (Array.isArray(data)) list = data;
   else if (data && Array.isArray(data.translations)) list = data.translations;
   else if (data && Array.isArray(data.result)) list = data.result;
+  else if (data && typeof data === 'object' && typeof expected === 'number' && expected > 0 &&
+           Array.from({ length: expected }, (_, i) => String(i + 1)).every(k => k in data)) {
+    list = Array.from({ length: expected }, (_, i) => data[String(i + 1)]);
+  }
   if (list === null) {
     throw new Error('LM Studio reply has no translations array. Expected a JSON array of ' + expected + ' translated strings.');
   }
   if (typeof expected === 'number' && list.length !== expected) {
-    throw new Error('LM Studio returned ' + list.length + ' translation(s) for ' + expected +
+    const err = new Error('LM Studio returned ' + list.length + ' translation(s) for ' + expected +
       ' source line(s) — refusing to pair them, because shifted entries would paint the wrong text into the wrong bubble.');
+    err.badFormat = true;
+    throw err;
   }
   return list.map(v => (v === null || v === undefined ? '' : String(v)));
 }
@@ -569,7 +718,7 @@ function parseLmStudioBody(bodyText, expected) {
   if (!text.trim()) {
     throw new Error('LM Studio reply was empty. Is a model loaded in LM Studio?');
   }
-  let parsedBody;
+  let parsedBody, badReply = text;
   try { parsedBody = JSON.parse(text); } catch { parsedBody = undefined; }
 
   let data = null;
@@ -584,7 +733,8 @@ function parseLmStudioBody(bodyText, expected) {
         data = JSON.parse(answer);
       } catch {
         const found = lmExtractJsonArray(answer, expected);
-        data = found ? found.parsed : null;
+        data = found ? found.parsed : (lmRepairArray(answer, expected) || lmRepairLines(answer, expected));
+        if (data === null) badReply = answer;
       }
     } else {
       // Not an envelope: a dedicated translation server answering
@@ -612,7 +762,10 @@ function parseLmStudioBody(bodyText, expected) {
     data = found ? found.parsed : null;
   }
   if (data === null || data === undefined) {
-    throw new Error('LM Studio reply was not valid JSON. Expected a JSON array of ' + expected + ' translated strings.');
+    const err = new Error('LM Studio reply was not valid JSON. Expected a JSON array of ' + expected + ' translated strings. Model said: ' +
+      String(badReply).replace(/\s+/g, ' ').slice(0, 240));
+    err.badFormat = true;
+    throw err;
   }
   return lmNormalizeTranslations(data, expected);
 }
@@ -679,7 +832,15 @@ async function localLlm(texts, settings, signal) {
   return googleFree(texts, settings.sourceLang, settings.targetLang, signal);
 }
 
-export async function translateBlocks(blocks, settings, onProgress, signal, deadlineMs = 30000, isUserCancelled) {
+function isAllCaps(t) {
+  const letters = (t || '').match(/\p{L}/gu) || [];
+  return letters.length >= 4 && !/\p{Ll}/u.test(t);
+}
+function toSentenceCase(t) {
+  return t.toLowerCase().replace(/(^|[.!?…]\s+|["«“]\s*)(\p{L})/gu, (m, pre, ch) => pre + ch.toUpperCase());
+}
+
+export async function translateBlocks(blocks, settings, onProgress, signal, deadlineMs = 120000, isUserCancelled) {
   const idx = [], texts = [];
   // List-like blocks (ragged entries, e.g. a table of contents) are sent line by
   // line so entries are not merged into one sentence; `spans` maps each block
@@ -703,7 +864,36 @@ export async function translateBlocks(blocks, settings, onProgress, signal, dead
   const translateStart = performance.now();
   const runBackend = async (b, attemptDeadlineMs, sig = signal) => {
     if (b === 'azure') return await azure(texts, settings, sig);
-    if (b === 'lmstudio') return await lmStudio(texts, settings, sig, attemptDeadlineMs ?? deadlineMs);
+    if (b === 'lmstudio') {
+      // ALL-CAPS lettering makes LLMs answer in caps and translate worse: send
+      // sentence case, restore the capitals on the way back.
+      // Identical bubbles (three "È VECCHIO!") are the classic way a small model
+      // merges or drops an entry: send each distinct text once, fan back out.
+      const uniq = [], slot = texts.map(t => { let k = uniq.indexOf(t); if (k < 0) { k = uniq.length; uniq.push(t); } return k; });
+      const caps = uniq.map(isAllCaps);
+      const sent = uniq.map((t, i) => caps[i] ? toSentenceCase(t) : t);
+      let out;
+      try {
+        out = await lmStudio(sent, settings, sig, attemptDeadlineMs ?? deadlineMs);
+      } catch (e) {
+        // A small model sometimes answers in prose or the wrong shape; asking
+        // again with a little sampling noise (temperature 0 repeats itself)
+        // usually gets a clean array.
+        if (!e || !e.badFormat) throw e;
+        try {
+          out = await lmStudio(sent, { ...settings, lmTemperature: 0.3, lmKeyed: true }, sig, attemptDeadlineMs ?? deadlineMs);
+        } catch (e2) {
+          // Still malformed or the wrong count (a small model merges or drops a
+          // bubble). One text per request cannot shift: pairing is by request.
+          if (!e2 || !e2.badFormat || sent.length < 2) throw e2;
+          out = [];
+          for (const one of sent) out.push((await lmStudio([one], settings, sig, attemptDeadlineMs ?? deadlineMs))[0]);
+        }
+      }
+      const ru = settings.targetLang === 'ru';
+      const fixed = out.map((t, i) => { const u = caps[i] && typeof t === 'string' ? t.toUpperCase() : t; return ru ? fixRussianAgreement(u) : u; });
+      return slot.map(k => fixed[k]);
+    }
     if (b === 'local-llm') return await localLlm(texts, settings, sig);
     return await googleFree(texts, settings.sourceLang, settings.targetLang, sig);
   };
@@ -730,8 +920,8 @@ export async function translateBlocks(blocks, settings, onProgress, signal, dead
       if (azureConfigured && backend !== 'azure') candidates.push('azure');
       // If the primary died by timeout-abort, the caller's signal is dead:
       // failover attempts on it would die instantly. Rescue on a fresh
-      // signal with its own 20s budget, so stall (30s) + rescue fits
-      // under the caller's 60s backstop. A user cancel during rescue
+      // signal with its own 20s budget, so stall (120s) + rescue fits
+      // under the caller's 180s backstop. A user cancel during rescue
       // still stops it via the loop-top check below.
       const rescueMode = signal?.aborted && !isUserCancelled?.();
       const failoverBudgetMs = rescueMode ? 20000 : deadlineMs;
@@ -749,7 +939,7 @@ export async function translateBlocks(blocks, settings, onProgress, signal, dead
       // the whole deadline, so later backends never got a turn and the
       // overall abort then poisoned their attempts too. Cap each LM Studio
       // failover attempt at 15s and stop when the budget is gone, so Azure
-      // always gets its turn inside the 30s translate budget.
+      // always gets its turn inside the 120s translate budget.
       const FAILOVER_LM_DEADLINE_MS = 15000;
       for (const fb of candidates) {
         const remaining = failoverBudgetMs - (performance.now() - budgetStart);

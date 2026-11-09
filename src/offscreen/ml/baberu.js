@@ -189,19 +189,19 @@ export class BaberuOCR {
   async loadVis(visBytes, executionProviders = ['wasm']) {
     if (this.vis) return;
     const u8 = visBytes instanceof Uint8Array ? visBytes : new Uint8Array(visBytes);
-    this.vis = await ort.InferenceSession.create(u8, { executionProviders });
+    this.vis = await ort.InferenceSession.create(u8, { executionProviders, logSeverityLevel: 3 });
   }
 
   async loadPre(preBytes, executionProviders = ['wasm']) {
     if (this.pre) return;
     const u8 = preBytes instanceof Uint8Array ? preBytes : new Uint8Array(preBytes);
-    this.pre = await ort.InferenceSession.create(u8, { executionProviders });
+    this.pre = await ort.InferenceSession.create(u8, { executionProviders, logSeverityLevel: 3 });
   }
 
   async loadStep(stepBytes, executionProviders = ['wasm']) {
     if (this.stp) return;
     const u8 = stepBytes instanceof Uint8Array ? stepBytes : new Uint8Array(stepBytes);
-    this.stp = await ort.InferenceSession.create(u8, { executionProviders });
+    this.stp = await ort.InferenceSession.create(u8, { executionProviders, logSeverityLevel: 3 });
   }
 
   setVocab(vocabJson) {

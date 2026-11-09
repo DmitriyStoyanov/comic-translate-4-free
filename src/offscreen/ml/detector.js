@@ -44,7 +44,7 @@ export class Detector {
     // never revoked, leaking every model's bytes for the page's lifetime,
     // and the blob + ORT's blob-fetch doubled the transient peak.)
     const u8 = modelBytes instanceof Uint8Array ? modelBytes : new Uint8Array(modelBytes);
-    this.session = await ort.InferenceSession.create(u8, { executionProviders });
+    this.session = await ort.InferenceSession.create(u8, { executionProviders, logSeverityLevel: 3 });
   }
 
   get loaded() { return !!this.session; }
