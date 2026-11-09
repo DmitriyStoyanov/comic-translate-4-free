@@ -66,6 +66,10 @@
   "check_lmstudio": {
     "message": "LM-Studio-Verbindung prüfen"
   },
+  "ctx_translate_page": {
+    "message": "Diese Seite mit comic-translate-4-free übersetzen",
+    "description": "Context menu item on the page background: translate the page picture (same as the popup Translate button)"
+  },
   "ctx_send_image": {
     "message": "An comic-translate-4-free senden",
     "description": "Context menu item on images: send this image to the translation pipeline"

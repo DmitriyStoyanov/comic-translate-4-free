@@ -87,6 +87,10 @@
   "checking": {
     "message": "जांच हो रही है…"
   },
+  "ctx_translate_page": {
+    "message": "comic-translate-4-free से इस पेज का अनुवाद करें",
+    "description": "Context menu item on the page background: translate the page picture (same as the popup Translate button)"
+  },
   "ctx_send_image": {
     "description": "Context menu item on images: send this image to the translation pipeline",
     "message": "Send to comic-translate-4-free"

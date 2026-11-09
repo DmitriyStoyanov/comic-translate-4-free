@@ -200,6 +200,9 @@ function stripForeignMarks(line) {
 export function fixItalianLine(line) {
   if (!line || !line.trim()) return line;
   line = stripForeignMarks(line).replace(/(\p{L}[,;:!?])(?=\p{L})/gu, '$1 ');
+  // A single digit glued to the end of a long word ("FUNZIONA2") is a misread
+  // of the ellipsis/flourish after it, not part of the word.
+  line = line.replace(/(\p{L}{4,})\d(?![\p{L}\p{N}])/gu, '$1');
   let toks = line.trim().split(/\s+/);
   // Mostly-capitals lines: "NuOVA" is a misread capital, not a name.
   const letters = line.match(/\p{L}/gu) || [];
@@ -274,7 +277,10 @@ export function isBrandText(text) {
 // than 3 such tokens. Low values mean the OCR read artwork or unreadable
 // lettering — better left alone than translated into confident nonsense.
 export function italianWordRatio(text) {
-  const toks = (text || '').toLowerCase().split(/[^\p{L}]+/u).filter(t => t.length >= 3);
+  // A trailing byline ("... di SILVIA ZICHE") is a name, not prose: leave it
+  // out of the share. Dotless/dotted "ı"/"İ" are OCR variants of plain "i".
+  const body = (text || '').replace(/ı/g, 'i').replace(/İ/g, 'I').replace(/\s+di\s+\S+(\s+\S+)?\s*$/i, '');
+  const toks = body.toLowerCase().split(/[^\p{L}]+/u).filter(t => t.length >= 3);
   if (toks.length < 3) return -1;
   return toks.filter(t => RANK.has(t)).length / toks.length;
 }

@@ -830,8 +830,10 @@
     const clampX = v => Math.max(0, Math.min(width, v));
     const clampY = v => Math.max(0, Math.min(height, v));
     for (const b of blocks) {
-      // Speech bubbles only (sound effects / free text stay as in the source).
-      if (b.text_class !== 'text_bubble' || !b.xyxy || !(b.translation || '').trim()) continue;
+      // Every block that was translated and redrawn gets a patch: speech
+      // bubbles, but also free text such as page titles and credits (the page
+      // image under it was erased, so without a patch it would vanish).
+      if (!b.xyxy || !(b.translation || '').trim()) continue;
       let [x1, y1, x2, y2] = b.xyxy;
       if (b.render_xyxy) {   // already in work-canvas units
         const r = b.render_xyxy;

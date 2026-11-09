@@ -2033,6 +2033,9 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 // replaces it in place. The page cache keys on image content, so it works
 // for manual sends too.
 const CTX_MENU_ID = 'ct-send-image';
+// Page-level item: starts the same whole-page run as the popup's Translate
+// button, for when the toolbar popup is unreachable (full-screen browser).
+const CTX_PAGE_MENU_ID = 'ct-translate-page';
 function menuPatternsFor(settings) {
   if (settings.allowAllSites) return null;
   const hosts = settings.siteWhitelist || [];
@@ -2053,8 +2056,37 @@ async function refreshContextMenu() {
     };
     if (patterns) props.documentUrlPatterns = patterns;
     await chrome.contextMenus.create(props);
+    const pageProps = {
+      id: CTX_PAGE_MENU_ID,
+      title: chrome.i18n.getMessage('ctx_translate_page') || 'Translate this page with comic-translate-4-free',
+      contexts: ['page'],
+    };
+    if (patterns) pageProps.documentUrlPatterns = patterns;
+    await chrome.contextMenus.create(pageProps);
   } catch (e) {
     console.warn('[ct] context menu setup failed:', String((e && e.message) || e).slice(0, 120));
+  }
+}
+// Whole-page run from the context menu: same gate and pipeline as the popup's
+// Translate button (MSG.TRANSLATE_PAGE), errors shown on the page's pill.
+async function handleTranslatePageFromMenu(tabId) {
+  try {
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!tab || /^chrome:\/\//.test(tab.url || '')) return;
+    const settings = await getSettings();
+    const host = hostOf(tab.url);
+    if (!host) return;
+    if (!settings.allowAllSites && !isSiteAllowed(host, settings.siteWhitelist || [])) return; // menu patterns mirror this gate
+    await cancelRunsForTab(tabId);
+    const r = await runPipeline(tabId);
+    if (!r.ok && r.error) {
+      try {
+        await chrome.scripting.executeScript({ target: { tabId }, files: CONTENT_SCRIPT_FILES });
+        await chrome.tabs.sendMessage(tabId, { type: MSG.RUN_PROGRESS, direct: true, stage: 'error', error: r.error });
+      } catch { /* no page access: stay silent */ }
+    }
+  } catch (e) {
+    console.warn('[ct] menu page translate failed:', String((e && e.message) || e).slice(0, 160));
   }
 }
 // Manual send: the right-clicked image goes through the pipeline like a page
@@ -2147,6 +2179,10 @@ async function fallbackCaptureViaTab(origTabId, imageUrl) {
 }
 if (chrome.contextMenus && chrome.contextMenus.onClicked) {
   chrome.contextMenus.onClicked.addListener((info, tab) => {
+    if (info && info.menuItemId === CTX_PAGE_MENU_ID) {
+      if (!tab || tab.id == null) return;
+      return handleTranslatePageFromMenu(tab.id);
+    }
     if (!info || info.menuItemId !== CTX_MENU_ID) return;
     if (!tab || tab.id == null || !info.srcUrl) return;
     // Return the promise so the worker stays alive for the run.

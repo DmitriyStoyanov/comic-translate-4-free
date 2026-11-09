@@ -87,6 +87,10 @@
   "checking": {
     "message": "comprobando…"
   },
+  "ctx_translate_page": {
+    "message": "Traducir esta página con comic-translate-4-free",
+    "description": "Context menu item on the page background: translate the page picture (same as the popup Translate button)"
+  },
   "ctx_send_image": {
     "description": "Context menu item on images: send this image to the translation pipeline",
     "message": "Enviar a comic-translate-4-free"
