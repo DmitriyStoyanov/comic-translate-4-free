@@ -162,6 +162,7 @@ function applyToForm(s) {
   setVal('minImageSize', s.minImageSize);
   setChecked('debugMode', s.debugMode);
   setChecked('autoTranslate', s.autoTranslateOnLoad);
+  setVal('displayMode', s.displayMode === 'interactive' ? 'interactive' : 'page');
   setChecked('playDing', s.playDing !== false);
   setChecked('allowAllSites', s.allowAllSites);
   allowedSites = [...(s.siteWhitelist || [])];
@@ -202,7 +203,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 $('threshold').oninput = e => { $('thresholdVal').textContent = Number(e.target.value).toFixed(2); autoSave(); };
 
 // Every control auto-saves; no Save button.
-for (const id of ['sourceLang', 'targetLang', 'backend', 'backendFailover', 'azureKey', 'azureRegion',
+for (const id of ['displayMode', 'sourceLang', 'targetLang', 'backend', 'backendFailover', 'azureKey', 'azureRegion',
     'lmStudioUrl', 'lmStudioApi', 'lmStudioKey', 'translateTimeoutSec',
     'threshold', 'minImageSize',
     'debugMode', 'autoTranslate', 'playDing']) {
@@ -250,6 +251,7 @@ function collect() {
     debugMode: $('debugMode').checked,
     backendFailover: $('backendFailover').checked,
     siteWhitelist: [...allowedSites], autoTranslateOnLoad: $('autoTranslate').checked,
+    displayMode: $('displayMode').value === 'interactive' ? 'interactive' : 'page',
     playDing: $('playDing').checked,
     allowAllSites: $('allowAllSites').checked,
   };

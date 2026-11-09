@@ -417,5 +417,20 @@
   "grant_host": {
     "message": "授予主机访问权限",
     "description": "Button to grant host permission for LM Studio server URL"
+  },
+  "display_mode": {
+    "message": "翻译显示方式"
+  },
+  "display_mode_page": {
+    "message": "整页（翻译后的图片）"
+  },
+  "display_mode_interactive": {
+    "message": "交互式（点击气泡进行翻译）"
+  },
+  "reveal_all": {
+    "message": "全部显示"
+  },
+  "hide_all": {
+    "message": "全部隐藏"
   }
 }

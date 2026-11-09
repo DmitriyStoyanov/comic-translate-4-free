@@ -130,6 +130,7 @@ async function refreshSettings() {
       if (settings.targetLang && TARGET_LANGS.some(([c]) => c === settings.targetLang)) $('targetLang').value = settings.targetLang;
       else $('targetLang').value = 'en';
     }
+    if (!keepUserValue('displayMode')) $('displayMode').value = settings.displayMode === 'interactive' ? 'interactive' : 'page';
     if (!keepUserValue('allowAllSites')) $('allowAllSites').checked = !!(settings && settings.allowAllSites);
   }
   initDone = true;
@@ -307,7 +308,7 @@ async function refreshSite(settings) {  const [tab] = await chrome.tabs.query({ 
 }
 
 $('cancelBtn').onclick = () => {
-  chrome.runtime.sendMessage({ type: 'ct/cancel-run' });
+  chrome.runtime.sendMessage({ type: 'ct/cancel-run' }).catch(() => {});
 };
 
 $('translateBtn').onclick = async () => {
@@ -323,6 +324,11 @@ $('translateBtn').onclick = async () => {
   const r = await chrome.runtime.sendMessage({ type: 'ct/translate-page' }).catch(e => ({ ok: false, error: String(e) }));
   if (!r.ok) $('error').textContent = r.error;
   refresh();
+};
+
+$('displayMode').onchange = e => {
+  markDirty('displayMode');
+  writeSettings({ displayMode: e.target.value === 'interactive' ? 'interactive' : 'page' }).catch(() => {});
 };
 
 $('backend').onchange = e => {

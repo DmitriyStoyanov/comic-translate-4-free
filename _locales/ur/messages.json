@@ -417,5 +417,20 @@
   "grant_host": {
     "message": "ہوسٹ تک رسائی دیں",
     "description": "Button to grant host permission for LM Studio server URL"
+  },
+  "display_mode": {
+    "message": "ترجمے کی نمائش"
+  },
+  "display_mode_page": {
+    "message": "پورا صفحہ (ترجمہ شدہ تصویر)"
+  },
+  "display_mode_interactive": {
+    "message": "انٹرایکٹو (بلبلے پر کلک کریں تو ترجمہ ہو)"
+  },
+  "reveal_all": {
+    "message": "سب دکھائیں"
+  },
+  "hide_all": {
+    "message": "سب چھپائیں"
   }
 }

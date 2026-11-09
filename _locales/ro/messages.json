@@ -417,5 +417,20 @@
   "grant_host": {
     "message": "Acordă acces la gazdă",
     "description": "Button to grant host permission for LM Studio server URL"
+  },
+  "display_mode": {
+    "message": "Afișarea traducerii"
+  },
+  "display_mode_page": {
+    "message": "Pagina întreagă (imagine tradusă)"
+  },
+  "display_mode_interactive": {
+    "message": "Interactiv (clic pe un balon îl traduce)"
+  },
+  "reveal_all": {
+    "message": "Arată tot"
+  },
+  "hide_all": {
+    "message": "Ascunde tot"
   }
 }

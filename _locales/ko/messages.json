@@ -417,5 +417,20 @@
   "grant_host": {
     "message": "호스트 액세스 허용",
     "description": "Button to grant host permission for LM Studio server URL"
+  },
+  "display_mode": {
+    "message": "번역 표시 방식"
+  },
+  "display_mode_page": {
+    "message": "전체 페이지(번역된 이미지)"
+  },
+  "display_mode_interactive": {
+    "message": "대화형(말풍선을 클릭하면 번역)"
+  },
+  "reveal_all": {
+    "message": "모두 보기"
+  },
+  "hide_all": {
+    "message": "모두 숨기기"
   }
 }

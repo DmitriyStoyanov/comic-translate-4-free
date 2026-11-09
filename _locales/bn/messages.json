@@ -417,5 +417,20 @@
   "grant_host": {
     "message": "হোস্ট অ্যাক্সেস মঞ্জুর করুন",
     "description": "Button to grant host permission for LM Studio server URL"
+  },
+  "display_mode": {
+    "message": "অনুবাদ প্রদর্শন"
+  },
+  "display_mode_page": {
+    "message": "পুরো পৃষ্ঠা (অনূদিত ছবি)"
+  },
+  "display_mode_interactive": {
+    "message": "ইন্টারঅ্যাক্টিভ (বাবলে ক্লিক করলে অনুবাদ হবে)"
+  },
+  "reveal_all": {
+    "message": "সব দেখান"
+  },
+  "hide_all": {
+    "message": "সব লুকান"
   }
 }

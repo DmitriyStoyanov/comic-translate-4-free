@@ -692,6 +692,210 @@
     return true;
   }
 
+  // ------------------------------------------------------------ interactive mode
+  // displayMode 'interactive': the page keeps its ORIGINAL <img>. Every
+  // translated speech bubble becomes a small clickable patch laid over it:
+  // dashed outline = "translatable, click me"; click reveals the translated
+  // crop (inpainted background + new text), click again reverts to the source.
+  // The layer lives in a closed shadow root on <html>, so page CSS cannot
+  // touch it and the page's own DOM/handlers stay as they were.
+  const layers = new Map();   // <img> -> { host, box, items, img, src, ro, timer }
+  let revealBar = null, revealBtn = null;
+
+  function uiMsg(key, fallback) {
+    try { const m = chrome.i18n.getMessage(key); if (m) return m; } catch { /* fall through */ }
+    return fallback;
+  }
+  function targetImage(srcUrl) {
+    if (srcUrl) {
+      return allImages().find(im => im.isConnected &&
+        ((im.currentSrc || im.src || '') === srcUrl || im.dataset.ctOriginal === srcUrl)) || null;
+    }
+    let im = mainImgEl && mainImgEl.isConnected ? mainImgEl : null;
+    if (!im) { findMainImage(); im = mainImgEl && mainImgEl.isConnected ? mainImgEl : null; }
+    return im;
+  }
+  function removeLayer(img) {
+    const L = layers.get(img);
+    if (!L) return;
+    clearInterval(L.timer);
+    try { L.ro && L.ro.disconnect(); } catch { /* ignore */ }
+    window.removeEventListener('resize', L.tick);
+    window.removeEventListener('scroll', L.tick, true);
+    L.host.remove();
+    layers.delete(img);
+    updateRevealBar();
+  }
+  function clearLayers() { for (const img of [...layers.keys()]) removeLayer(img); }
+
+  // Where the overlay must live. In fullscreen the browser renders only the
+  // fullscreen element's subtree, so anything attached to <html> vanishes:
+  // move into that element instead (it is position:fixed, so it is also the
+  // containing block for our absolutely positioned layer).
+  function overlayParent() {
+    const fs = document.fullscreenElement || document.webkitFullscreenElement;
+    return fs && fs.tagName !== 'IMG' && fs.tagName !== 'VIDEO' ? fs : document.documentElement;
+  }
+  function syncParents() {
+    const want = overlayParent();
+    for (const L of layers.values()) if (L.host.parentNode !== want) { want.appendChild(L.host); L.lastKey = ''; }
+    if (revealBar && revealBar.parentNode !== want) want.appendChild(revealBar);
+  }
+  // The reader may show the same picture through a different <img> in
+  // fullscreen (or rebuild it): follow it instead of dropping the layer.
+  function findReplacementImage(L) {
+    invalidateImageCache();
+    return allImages().find(im => im !== L.img && im.isConnected && im.src === L.src && im.complete &&
+      im.getBoundingClientRect().width > 0) || null;
+  }
+  function rebindLayer(L, img) {
+    layers.delete(L.img);
+    try { L.ro && L.ro.disconnect(); } catch { /* ignore */ }
+    L.img = img; L.lastKey = '';
+    layers.set(img, L);
+    try { L.ro = new ResizeObserver(L.tick); L.ro.observe(img); } catch { /* interval covers it */ }
+  }
+
+  function placeLayer(L) {
+    const r = L.img.getBoundingClientRect();
+    const par = L.host.parentNode;
+    const inDoc = !par || par === document.documentElement;
+    const pr = inDoc ? null : par.getBoundingClientRect();
+    const key = [r.left, r.top, r.width, r.height, window.scrollX, window.scrollY, pr ? pr.left + ',' + pr.top : ''].join(',');
+    if (key === L.lastKey) return;
+    L.lastKey = key;
+    const s = L.box.style;
+    s.left = (inDoc ? r.left + window.scrollX : r.left - pr.left - par.clientLeft + par.scrollLeft) + 'px';
+    s.top = (inDoc ? r.top + window.scrollY : r.top - pr.top - par.clientTop + par.scrollTop) + 'px';
+    s.width = r.width + 'px';
+    s.height = r.height + 'px';
+    s.display = r.width > 0 && r.height > 0 ? 'block' : 'none';
+  }
+
+  function updateRevealBar() {
+    if (!layers.size) { if (revealBar) { revealBar.remove(); revealBar = revealBtn = null; } return; }
+    if (!revealBar) {
+      revealBar = document.createElement('div');
+      revealBar.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;';
+      const root = revealBar.attachShadow({ mode: 'closed' });
+      root.innerHTML = '<style>button{font:600 13px/1.2 sans-serif;color:#fff;background:#1a73e8;border:1px solid #1557b0;' +
+        'border-radius:999px;padding:9px 16px;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.45)}button:hover{background:#1967d2}</style><button type="button"></button>';
+      revealBtn = root.querySelector('button');
+      revealBtn.addEventListener('click', e => {
+        e.preventDefault(); e.stopPropagation();
+        const all = allItems();
+        const reveal = all.some(it => !it.shown);
+        for (const it of all) setShown(it, reveal);
+        updateRevealBar();
+      });
+      overlayParent().appendChild(revealBar);
+    }
+    revealBtn.textContent = allItems().some(it => !it.shown)
+      ? uiMsg('reveal_all', 'Reveal all') : uiMsg('hide_all', 'Hide all');
+  }
+  // Fullscreen enter/exit: re-home the overlay immediately (the 400ms tick
+  // would show a visible gap).
+  function onFullscreenChange() { syncParents(); for (const L of layers.values()) L.tick && L.tick(); }
+  document.addEventListener('fullscreenchange', onFullscreenChange);
+  document.addEventListener('webkitfullscreenchange', onFullscreenChange);
+  function allItems() { return [...layers.values()].flatMap(L => L.items); }
+  function setShown(it, on) {
+    it.shown = on;
+    it.el.classList.toggle('on', on);
+  }
+
+  // work = the finished page canvas (inpainted + translated text), scaled by
+  // rs relative to the capture space the blocks' coordinates live in.
+  function buildInteractiveLayer(img, work, blocks, width, height, rs) {
+    removeLayer(img);
+    const host = document.createElement('div');
+    host.style.cssText = 'position:absolute;left:0;top:0;width:0;height:0;z-index:2147483000;';
+    const root = host.attachShadow({ mode: 'closed' });
+    const style = document.createElement('style');
+    style.textContent =
+      ':host{all:initial}.box{position:absolute;pointer-events:none;overflow:visible}' +
+      '.p{position:absolute;box-sizing:border-box;cursor:pointer;pointer-events:auto;border-radius:6px;' +
+      'outline:2px dashed rgba(26,115,232,.85);outline-offset:1px;background:rgba(26,115,232,.12);' +
+      'transition:background .12s,outline-color .12s}' +
+      '.p:hover{background:rgba(26,115,232,.28);outline-style:solid;outline-color:#1a73e8}' +
+      '.p canvas{display:block;width:100%;height:100%;opacity:0;transition:opacity .12s;pointer-events:none}' +
+      '.p.on{background:transparent;outline:1px solid rgba(30,160,90,.7)}' +
+      '.p.on:hover{outline:2px solid #1ea05a}' +
+      '.p.on canvas{opacity:1}';
+    const box = document.createElement('div');
+    box.className = 'box';
+    root.append(style, box);
+
+    const items = [];
+    const clampX = v => Math.max(0, Math.min(width, v));
+    const clampY = v => Math.max(0, Math.min(height, v));
+    for (const b of blocks) {
+      // Speech bubbles only (sound effects / free text stay as in the source).
+      if (b.text_class !== 'text_bubble' || !b.xyxy || !(b.translation || '').trim()) continue;
+      let [x1, y1, x2, y2] = b.xyxy;
+      if (b.render_xyxy) {   // already in work-canvas units
+        const r = b.render_xyxy;
+        x1 = Math.min(x1, r[0] / rs); y1 = Math.min(y1, r[1] / rs);
+        x2 = Math.max(x2, r[2] / rs); y2 = Math.max(y2, r[3] / rs);
+      }
+      const padX = Math.max(4, (x2 - x1) * 0.06), padY = Math.max(4, (y2 - y1) * 0.06);
+      x1 = clampX(x1 - padX); y1 = clampY(y1 - padY); x2 = clampX(x2 + padX); y2 = clampY(y2 + padY);
+      const sx = Math.round(x1 * rs), sy = Math.round(y1 * rs);
+      const sw = Math.round((x2 - x1) * rs), sh = Math.round((y2 - y1) * rs);
+      if (sw < 4 || sh < 4) continue;
+      const c = document.createElement('canvas');
+      c.width = sw; c.height = sh;
+      c.getContext('2d').drawImage(work, sx, sy, sw, sh, 0, 0, sw, sh);
+      const el = document.createElement('div');
+      el.className = 'p';
+      el.style.left = (x1 / width * 100) + '%';
+      el.style.top = (y1 / height * 100) + '%';
+      el.style.width = ((x2 - x1) / width * 100) + '%';
+      el.style.height = ((y2 - y1) / height * 100) + '%';
+      // Smaller bubbles on top, so nested/overlapping hit areas stay clickable.
+      el.style.zIndex = String(1000000 - Math.min(999999, Math.round((x2 - x1) * (y2 - y1) / 100)));
+      el.appendChild(c);
+      const it = { el, shown: false };
+      // The page's own click/drag handlers (page turning, zoom) must not fire.
+      for (const ev of ['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'touchstart', 'touchend', 'dblclick', 'contextmenu']) {
+        el.addEventListener(ev, e => { if (ev !== 'contextmenu') e.stopPropagation(); });
+      }
+      el.addEventListener('click', e => {
+        e.preventDefault(); e.stopPropagation();
+        setShown(it, !it.shown);
+        updateRevealBar();
+      });
+      box.appendChild(el);
+      items.push(it);
+    }
+    if (!items.length) return 0;
+
+    const L = { host, box, items, img, src: img.src, lastKey: '', ro: null, timer: 0 };
+    layers.set(img, L);
+    overlayParent().appendChild(host);
+    placeLayer(L);
+    // Follow the image through resizes, scrolling and layout shifts (lazy
+    // content loading above it moves it without any event).
+    const tick = () => {
+      syncParents();
+      let cur = L.img;
+      if (!cur.isConnected || cur.getBoundingClientRect().width === 0) {
+        const alt = findReplacementImage(L);
+        if (alt) { rebindLayer(L, alt); cur = alt; }
+        else if (!cur.isConnected) { removeLayer(cur); return; }
+      }
+      if (cur.src !== L.src) { removeLayer(cur); return; }
+      placeLayer(L);
+    };
+    L.tick = tick;
+    try { L.ro = new ResizeObserver(tick); L.ro.observe(img); } catch { /* interval covers it */ }
+    window.addEventListener('resize', tick, { passive: true });
+    window.addEventListener('scroll', tick, { passive: true, capture: true });
+    L.timer = setInterval(tick, 400);
+    updateRevealBar();
+    return items.length;
+  }
+
   // ------------------------------------------------------------ status pill
   let pill = null, pillTimer = null;
   function ensurePill() {
@@ -764,6 +968,7 @@
       g.style.opacity = '.6';
       // Classic script (no modules): use the literal message type.
       chrome.runtime.sendMessage({ type: 'ct/grant-image-host', host: grant.host }, r => {
+        void chrome.runtime.lastError; // mark as checked: no receiver (worker restarting) is not an error here
         if (r && r.ok) {
           // Granted — the worker re-runs the pipeline; hide the error.
           p.style.display = 'none';
@@ -1135,6 +1340,7 @@
       // from any older run (a page the user already left) are ignored — they
       // must never touch this page's DOM.
       latestRunId = msg.runId;
+      clearLayers(); // a new run re-creates the interactive patches
       openTabKeepAlive(msg.runId); // FIX3: tab-held keep-alive for this run.
       // Clear stale original-image markers from a previous run (SPA
       // navigation can leave them behind; a new run must not resolve
@@ -1250,7 +1456,21 @@
             }
           }
           let replaced = false;
-          if (mode === 'replace') {
+          if (mode === 'replace' && settings.displayMode === 'interactive') {
+            // Keep the original <img>; overlay clickable per-bubble patches.
+            const im = targetImage(msg.srcUrl);
+            // An earlier whole-page run may have left the translated image in
+            // place; the stashed original is the true source picture.
+            if (im && im.dataset.ctOriginal && /^data:/i.test(im.currentSrc || im.src)) {
+              im.removeAttribute('srcset');
+              im.src = im.dataset.ctOriginal;
+            }
+            if (im) buildInteractiveLayer(im, work, blocks, width, height, rs);
+            replaced = !!im;
+            if (!im) showPillError(pillMsg('pill_err_page_changed'));
+            else if (overlay) overlay.style.display = 'none';
+          } else if (mode === 'replace') {
+            { const prev = targetImage(msg.srcUrl); if (prev) removeLayer(prev); }
             // In-place: swap the page's original <img> for the translated one.
             // No overlay mask — the translation lives in the page itself.
             // The manual-send path names the exact <img> (msg.srcUrl); the

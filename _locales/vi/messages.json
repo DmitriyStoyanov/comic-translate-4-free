@@ -417,5 +417,20 @@
   "grant_host": {
     "message": "Cấp quyền truy cập máy chủ",
     "description": "Button to grant host permission for LM Studio server URL"
+  },
+  "display_mode": {
+    "message": "Hiển thị bản dịch"
+  },
+  "display_mode_page": {
+    "message": "Toàn trang (ảnh đã dịch)"
+  },
+  "display_mode_interactive": {
+    "message": "Tương tác (nhấp vào bong bóng để dịch)"
+  },
+  "reveal_all": {
+    "message": "Hiện tất cả"
+  },
+  "hide_all": {
+    "message": "Ẩn tất cả"
   }
 }

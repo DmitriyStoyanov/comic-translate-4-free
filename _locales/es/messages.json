@@ -417,5 +417,20 @@
   "grant_host": {
     "message": "Conceder acceso al host",
     "description": "Button to grant host permission for LM Studio server URL"
+  },
+  "display_mode": {
+    "message": "Visualización de la traducción"
+  },
+  "display_mode_page": {
+    "message": "Página completa (imagen traducida)"
+  },
+  "display_mode_interactive": {
+    "message": "Interactivo (clic en un globo para traducirlo)"
+  },
+  "reveal_all": {
+    "message": "Mostrar todo"
+  },
+  "hide_all": {
+    "message": "Ocultar todo"
   }
 }

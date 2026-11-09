@@ -20,6 +20,7 @@ export const DEFAULT_SETTINGS = {
   siteWhitelist: [], // hostnames with site access, e.g. ['example.com']
   allowAllSites: false, // site access: translate on any site (requests <all_urls> when enabled)
   autoTranslateOnLoad: true, // start the pipeline automatically on allowed page loads
+  displayMode: 'page', // 'page' = whole translated image | 'interactive' = original image, click a bubble to reveal its translation
   playDing: true, // play a chime when a translation finishes (toggle in Settings)
   firstRun: false, // transient: set true by onInstalled, consumed by the popup to show the models section once
 };

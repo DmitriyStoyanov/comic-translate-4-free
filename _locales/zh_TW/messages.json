@@ -417,5 +417,20 @@
   "grant_host": {
     "message": "授予主機存取權限",
     "description": "Button to grant host permission for LM Studio server URL"
+  },
+  "display_mode": {
+    "message": "翻譯顯示方式"
+  },
+  "display_mode_page": {
+    "message": "整頁（翻譯後的圖片）"
+  },
+  "display_mode_interactive": {
+    "message": "互動式（點擊對話框進行翻譯）"
+  },
+  "reveal_all": {
+    "message": "全部顯示"
+  },
+  "hide_all": {
+    "message": "全部隱藏"
   }
 }

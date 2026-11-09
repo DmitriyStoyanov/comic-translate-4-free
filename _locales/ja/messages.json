@@ -417,5 +417,20 @@
   "grant_host": {
     "message": "ホストへのアクセスを許可",
     "description": "Button to grant host permission for LM Studio server URL"
+  },
+  "display_mode": {
+    "message": "翻訳の表示方法"
+  },
+  "display_mode_page": {
+    "message": "ページ全体（翻訳済み画像）"
+  },
+  "display_mode_interactive": {
+    "message": "インタラクティブ（吹き出しをクリックして翻訳）"
+  },
+  "reveal_all": {
+    "message": "すべて表示"
+  },
+  "hide_all": {
+    "message": "すべて非表示"
   }
 }
