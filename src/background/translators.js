@@ -363,11 +363,25 @@ function lmStudioPrompt(texts, settings) {
     ' page as context and keep names and tone consistent. Translate as a native comic translator would —' +
     ' idioms by meaning rather than word for word, exclamations short and lively, verse rhythmic and rhymed' +
     ' where possible. The source was read by OCR and may contain small errors: translate what was meant.' +
-    ' Do not translate logos or brand names. Use «» for quotation marks.';
+    ' Do not translate logos or brand names. Use «» for quotation marks.' +
+    // A sentence is often split over several consecutive bubbles; translated one
+    // by one each half loses its meaning (a dropped "sick", a dangling "it must be").
+    ' A sentence may continue across consecutive texts or be split between speakers: read the neighbours first,' +
+    ' translate the whole thought, then give each text its own natural part, never dropping a word of meaning.' +
+    // Small models slip on case/gender agreement; the same key word must also
+    // stay the same word across the page (a gag often hangs on it).
+    ' Check grammatical agreement (gender, case, number) in the finished sentences and use the same word for the' +
+    ' same thing throughout the page.' +
+    // Russian runs 15-25% longer than Italian and bubbles do not grow, so the
+    // renderer would have to shrink the type or break words.
+    ' Bubbles are small: keep each translation about as long as its source text or shorter — drop filler words,' +
+    ' prefer short natural phrasing over a literal long one.';
   const glossary = comicGlossary(settings.sourceLang, settings.targetLang);
   if (glossary) context += ' Use these established names: ' + glossary + '.';
   const hints = idiomHints(texts, settings.sourceLang, settings.targetLang);
   if (hints) context += ' Idioms in this page: ' + hints + '.';
+  const shots = FEW_SHOT[from_to(settings)];
+  if (shots) context += ' ' + shots;
   if (settings.lmKeyed) {
     // Keyed form: an entry keeps its number even if the model merges or skips
     // one, so a short answer cannot shift the pairing.
@@ -389,7 +403,15 @@ function lmStudioPrompt(texts, settings) {
 // Established character names per language pair (Disney comics).
 const COMIC_GLOSSARY = {
   'it>ru': 'Paperino = Дональд Дак; Paperone = Скрудж Макдак; Topolino = Микки Маус; Minni = Минни; Pippo = Гуфи;' +
-    ' Paperina = Дейзи; Qui, Quo, Qua = Билли, Вилли и Дилли; Nonna Papera = бабушка Дак; Gastone = Гладстон',
+    ' lo zio Paperino = дядя Дональд; Paperina = Дейзи; Qui, Quo, Qua = Билли, Вилли и Дилли; Nonna Papera = бабушка Дак; Gastone = Гладстон',
+};
+const from_to = (settings) => settings.sourceLang + '>' + settings.targetLang;
+// Worked examples (invented, not from any page) for the failure modes seen in
+// practice: a sentence split over two bubbles, and gender agreement.
+const FEW_SHOT = {
+  'it>ru': 'Examples of the expected quality: "Se quello era il tuo piano" + "non è stato un successo!" →' +
+    ' «Если это и был твой план…» + «то удался он не слишком!» (one thought over two bubbles; "план" is masculine: «твой»);' +
+    ' "Dev\'essere stanchissimo!" → «Он, наверное, совсем без сил!» (not a literal «Это должно быть…»).',
 };
 // Idioms a small model renders word for word, with their Russian meaning;
 // only the ones present on the page are added to the prompt.
@@ -401,6 +423,12 @@ const IDIOM_HINTS = {
     [/anno nuovo,? vita nuova/i, '"Anno nuovo, vita nuova!" = proverb «Новый год — новая жизнь!»'],
     [/\bè vecchio\b/i, '"È vecchio!" = it is old / stale news, exclaimed: «Старо!» or «Это старо!» (neuter, not «старый»)'],
     [/chi cerca trova/i, '"chi cerca trova" = «кто ищет, тот найдёт»'],
+    [/sorpres/i, '"sorpresa" = «сюрприз» (masculine: «твой сюрприз», «это был не сюрприз»); use this one word every time, also for "riservare una sorpresa" = «приготовить сюрприз», not a verb like «поудивлю»'],
+    [/tutto miele/i, '"diventare tutto miele" = become sugary-sweet, suddenly all kindness: «стать сама любезность» / «опять сладок, как мёд»'],
+    [/si frena/i, '"si frena" = holds himself back: «сдерживается», «берёт себя в руки»'],
+    [/dev['’]?essere/i, '"dev\'essere" = «должно быть» / «наверное», «он, видимо…»; with "malato" = «он, наверное, тяжело болен»'],
+    [/\bgravemente\b/i, '"gravemente" = «тяжело» (тяжело болен), not «очень плохо»'],
+    [/\bregali\b/i, '"regali" = «подарки»'],
   ],
 };
 function idiomHints(texts, src, dst) {

@@ -18,6 +18,10 @@ const cases = [
   ["E, POICHE'CHI CERCA TROVA,", "E, POICHÉ CHI CERCA TROVA,"],
   ["CHE CERCANDO VAGIULIVOJ", "CHE CERCANDO VA GIULIVO"],
   ["Che cosa vuoi? E ora?", "Che cosa vuoi? E ora?"],
+  // drop-cap caption: big "M" + small-caps "A" read as two lines
+  ["M\nA\nANCORA\nUNA VOLTA\nPAPERINO\nSI FRENA", "MA\nANCORA\nUNA VOLTA\nPAPERINO\nSI FRENA"],
+  ["M A ANCORA UNA VOLTA PAPERINO", "MA ANCORA UNA VOLTA PAPERINO"],
+  ["C A CASA NOSTRA", "A CASA NOSTRA"],                                     // not a drop cap: debris still stripped
 ];
 let bad = 0;
 for (const [i, o] of cases) { const g = fixItalianText(i); if (g !== o) { bad++; console.log('FAIL', JSON.stringify(i), '->', JSON.stringify(g), 'expected', JSON.stringify(o)); } }

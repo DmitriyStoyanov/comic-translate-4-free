@@ -211,9 +211,21 @@ export function fixItalianLine(line) {
   return out.join(' ');
 }
 
+// Captions open with a drop cap: a big "M" and a small-caps "a" that OCR reads
+// as two one-letter lines ("M" / "A" / "ANCORA UNA VOLTA…"). Left alone, the
+// lone consonant is stripped as artwork debris and the "A" becomes the
+// preposition. Re-join them when the pair spells a two-letter function word.
+const DROPCAP_WORDS = new Set(['ma', 'se', 'ne', 'ci', 'si', 'mi', 'ti', 'vi', 'li', 'la', 'lo', 'le', 'di', 'da', 'no', 'su']);
+function joinDropCap(text) {
+  const m = text.match(/^\s*([B-DF-HJ-NP-TV-Zb-df-hj-np-tv-z])[\s\n]+([AEIOUaeiou])(?=[\s\n]|$)/);
+  if (!m || !DROPCAP_WORDS.has((m[1] + m[2]).toLowerCase())) return text;
+  return m[1] + m[2] + text.slice(m[0].length);
+}
+
 // Block-level: line fixes plus the "È" sentence-start rule.
 export function fixItalianText(text) {
   if (!text) return text;
+  text = joinDropCap(text);
   const lines = text.split('\n').map(fixItalianLine);
   let t = lines.join('\n');
   // Artwork next to a caption leaves stray capital consonants at its ends
