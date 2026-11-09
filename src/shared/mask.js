@@ -201,7 +201,13 @@ function buildBubbleClipMask(cropW, cropH, bounds, bubbleXyxy, inset, pageGray, 
     for (let y = Math.max(0, bRY1); y < Math.min(ch, bRY2); y++) { sample(y, bRX1); sample(y, bRX2 - 1); }
     if (total === 0 || touch / total < 0.5) return ellipse;
 
-    let filled = fillHoles(bubbleMask, cw, ch);
+    // Letters that touch the balloon outline (the ends of the first line in a
+    // rounded corner) bite notches out of the background region, so fillHoles
+    // cannot see them as enclosed and they would be left unerased. A closing a
+    // little wider than a letter stroke bridges those notches; the outline
+    // itself stays outside the region (the region only holds background).
+    const closed = erode(dilate(bubbleMask, cw, ch, 9, 1), cw, ch, 9, 1);
+    let filled = fillHoles(closed, cw, ch);
     const segInset = Math.min(2, inset);
     if (segInset > 0) {
       // cross-shaped 3x3 erode
@@ -241,7 +247,7 @@ function buildBubbleClipMask(cropW, cropH, bounds, bubbleXyxy, inset, pageGray, 
 
 // ---- clip_mask_components_to_bubble ------------------------------------------------
 function clipMaskComponentsToBubble(cropMask255, cropW, cropH, bounds, bubbleXyxy, inset,
-    pageGray, pageW, pageH, seedBbox, dilateK, dilateIt) {
+    pageGray, pageW, pageH, seedBbox, dilateK, dilateIt, rawMask255 = null) {
   const clip = buildBubbleClipMask(cropW, cropH, bounds, bubbleXyxy, inset, pageGray, pageW, pageH, seedBbox);
   if (!clip) {
     const d = dilate(to01(cropMask255), cropW, cropH, dilateK, dilateIt);
@@ -257,6 +263,18 @@ function clipMaskComponentsToBubble(cropMask255, cropW, cropH, bounds, bubbleXyx
   const kept = new Uint8Array(cropW * cropH);
   for (let i = 0; i < labels.length; i++) {
     if (overlapping.has(labels[i])) kept[i] = clip[i] ? 255 : 0;
+  }
+  // Glyphs fused with the balloon outline were rejected as part of the outline
+  // by the text-like filter. Take them back: any raw foreground pixel inside the
+  // clip (the outline itself never is) and within the detected text box.
+  if (rawMask255 && seedBbox) {
+    const pad = 6;
+    const ex1 = Math.max(0, Math.round(seedBbox[0]) - bounds[0] - pad), ey1 = Math.max(0, Math.round(seedBbox[1]) - bounds[1] - pad);
+    const ex2 = Math.min(cropW, Math.round(seedBbox[2]) - bounds[0] + pad), ey2 = Math.min(cropH, Math.round(seedBbox[3]) - bounds[1] + pad);
+    for (let y = ey1; y < ey2; y++) for (let x = ex1; x < ex2; x++) {
+      const i = y * cropW + x;
+      if (rawMask255[i] && clip[i]) kept[i] = 255;
+    }
   }
   if (dilateK > 0) {
     const d = dilate(to01(kept), cropW, cropH, dilateK, dilateIt);
@@ -353,6 +371,7 @@ export function buildBlockMaskData(pageRgba, pageW, pageH, pageGray, blk, defaul
   // Filter to text-like components for BOTH bubble and free text. Free text
   // on textured/photo backgrounds otherwise masks huge non-text areas,
   // producing giant LaMa patches (slow, blurry, OOM-prone).
+  const rawMask = cropMask;
   const sel = selectTextLikeComponents({ data: cropMask, w: cw, h: ch }, textBounds, searchPadding);
   cropMask = sel.data;
   // Artwork beside a left-aligned column (a character the text wraps around):
@@ -382,9 +401,9 @@ export function buildBlockMaskData(pageRgba, pageW, pageH, pageGray, blk, defaul
   if (isBubble) {
     const inset = Math.max(1, k);
     dilated = clipMaskComponentsToBubble(cropMask, cw, ch, [cx1, cy1, cx2, cy2],
-      blk.bubble_xyxy, inset, pageGray, pageW, pageH, blk.xyxy, k, iters);
+      blk.bubble_xyxy, inset, pageGray, pageW, pageH, blk.xyxy, k, iters, rawMask);
     // final envelope: detector envelope + 2px, plus 5x5x1 halo of admitted components
-    const fp = 2;
+    const fp = 6;   // matches the rescue padding in clipMaskComponentsToBubble
     const ex1 = Math.max(0, tx1 - cx1 - fp), ey1 = Math.max(0, ty1 - cy1 - fp);
     const ex2 = Math.min(cw, tx2 - cx1 + fp), ey2 = Math.min(ch, ty2 - cy1 + fp);
     const halo = dilate(to01(cropMask), cw, ch, 5, 1);

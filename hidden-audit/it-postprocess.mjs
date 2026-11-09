@@ -21,6 +21,9 @@ const cases = [
   // drop-cap caption: big "M" + small-caps "A" read as two lines
   ["M\nA\nANCORA\nUNA VOLTA\nPAPERINO\nSI FRENA", "MA\nANCORA\nUNA VOLTA\nPAPERINO\nSI FRENA"],
   ["M A ANCORA UNA VOLTA PAPERINO", "MA ANCORA UNA VOLTA PAPERINO"],
+  ["L'ANNO NUOVO SARA` TOTAL.\nMENTE DIVERSO", "L'ANNO NUOVO SARÀ TOTALMENTE DIVERSO"],
+  ["IO NON SARO` PIU` SCALO GNATO, NEL 1957 SARA` TACCAGNO! 1957", "IO NON SARÒ PIÙ SCALOGNATO, NEL 1957 SARÀ TACCAGNO!"],
+  ["LA MIA DISAV VENTURA VI ABBIA FATTO", "LA MIA DISAVVENTURA VI ABBIA FATTO"],
   ["C A CASA NOSTRA", "A CASA NOSTRA"],                                     // not a drop cap: debris still stripped
 ];
 let bad = 0;

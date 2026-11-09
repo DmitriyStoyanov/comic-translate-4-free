@@ -1,6 +1,7 @@
 // Translation backends. translateBlocks(blocks, settings) -> aligned [string].
 // Empty source texts map to empty translations. Throws with a human message.
 import { LANGS, TARGET_LANGS, updateSettingsField } from '../shared/settings.js';
+import { fixRussianAgreement } from '../shared/ru-postprocess.js';
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 // Abort-aware sleep: rejects immediately on cancel instead of waiting out
@@ -374,12 +375,14 @@ function lmStudioPrompt(texts, settings) {
     ' same thing throughout the page.' +
     // Russian runs 15-25% longer than Italian and bubbles do not grow, so the
     // renderer would have to shrink the type or break words.
-    ' Bubbles are small: keep each translation about as long as its source text or shorter — drop filler words,' +
-    ' prefer short natural phrasing over a literal long one.';
+    ' Bubbles are small, so prefer short natural phrasing over a literal long one — but translate EVERY sentence' +
+    ' and clause of every text to the end: never stop early, summarise or leave out the last part of a long text.';
   const glossary = comicGlossary(settings.sourceLang, settings.targetLang);
   if (glossary) context += ' Use these established names: ' + glossary + '.';
   const hints = idiomHints(texts, settings.sourceLang, settings.targetLang);
   if (hints) context += ' Idioms in this page: ' + hints + '.';
+  const frag = fragmentNote(texts);
+  if (frag) context += ' ' + frag;
   const shots = FEW_SHOT[from_to(settings)];
   if (shots) context += ' ' + shots;
   if (settings.lmKeyed) {
@@ -405,6 +408,21 @@ const COMIC_GLOSSARY = {
   'it>ru': 'Paperino = Дональд Дак; Paperone = Скрудж Макдак; Topolino = Микки Маус; Minni = Минни; Pippo = Гуфи;' +
     ' lo zio Paperino = дядя Дональд; Paperina = Дейзи; Qui, Quo, Qua = Билли, Вилли и Дилли; Nonna Papera = бабушка Дак; Gastone = Гладстон',
 };
+// Short texts without closing punctuation ("Dev'essere", "Lo zio Paperino") are
+// pieces of a sentence that the comic spreads over several bubbles, not always
+// in the order the page was read in. Naming them lets the model reassemble the
+// thought before it translates.
+function fragmentNote(texts) {
+  const idx = [];
+  texts.forEach((t, i) => {
+    const s = (t || '').trim();
+    if (s && s.split(/\s+/).length <= 4 && !/[.!?…»"”]$/.test(s)) idx.push(i + 1);
+  });
+  if (!idx.length) return '';
+  return 'Texts ' + idx.join(', ') + ' have no closing punctuation: each is the start or middle of a sentence continued in' +
+    ' another nearby text (often a short exclamation such as "…gravely ill!"), possibly listed out of order.' +
+    ' Reassemble the sentence first, then split the translation back so every text gets its own part.';
+}
 const from_to = (settings) => settings.sourceLang + '>' + settings.targetLang;
 // Worked examples (invented, not from any page) for the failure modes seen in
 // practice: a sentence split over two bubbles, and gender agreement.
@@ -426,9 +444,14 @@ const IDIOM_HINTS = {
     [/sorpres/i, '"sorpresa" = «сюрприз» (masculine: «твой сюрприз», «это был не сюрприз»); use this one word every time, also for "riservare una sorpresa" = «приготовить сюрприз», not a verb like «поудивлю»'],
     [/tutto miele/i, '"diventare tutto miele" = become sugary-sweet, suddenly all kindness: «стать сама любезность» / «опять сладок, как мёд»'],
     [/si frena/i, '"si frena" = holds himself back: «сдерживается», «берёт себя в руки»'],
-    [/dev['’]?essere/i, '"dev\'essere" = «должно быть» / «наверное», «он, видимо…»; with "malato" = «он, наверное, тяжело болен»'],
+    [/dev['’]?essere/i, '"dev\'essere" = «должно быть» / «наверное»; "Lo zio Paperino" + "Dev\'essere" + "Gravemente malato!" are ONE sentence over three bubbles = «Дядя Дональд, / наверное, / тяжело болен!»'],
     [/\bgravemente\b/i, '"gravemente" = «тяжело» (тяжело болен), not «очень плохо»'],
     [/\bregali\b/i, '"regali" = «подарки»'],
+    [/scalogn/i, '"scalognato" = «невезучий» (unlucky), NOT «бедный»'],
+    [/numero fausto/i, '"numero fausto" = «счастливое число»; "finisce per 7" = «заканчивается на семёрку» — keep the digit 7 in the sentence'],
+    [/ancora una volta/i, '"ancora una volta" = «снова» / «ещё раз» (once more); do not add «однажды»'],
+    [/taccagn/i, '"taccagno" = «скупой», «скряга»'],
+    [/\bnel (19|20)\d\d\b/i, '"Nel 1957" opens a sentence: «В 1957 году…»; keep the year inside the sentence, do not repeat it at the end'],
   ],
 };
 function idiomHints(texts, src, dst) {
@@ -867,7 +890,8 @@ export async function translateBlocks(blocks, settings, onProgress, signal, dead
           for (const one of sent) out.push((await lmStudio([one], settings, sig, attemptDeadlineMs ?? deadlineMs))[0]);
         }
       }
-      const fixed = out.map((t, i) => caps[i] && typeof t === 'string' ? t.toUpperCase() : t);
+      const ru = settings.targetLang === 'ru';
+      const fixed = out.map((t, i) => { const u = caps[i] && typeof t === 'string' ? t.toUpperCase() : t; return ru ? fixRussianAgreement(u) : u; });
       return slot.map(k => fixed[k]);
     }
     if (b === 'local-llm') return await localLlm(texts, settings, sig);

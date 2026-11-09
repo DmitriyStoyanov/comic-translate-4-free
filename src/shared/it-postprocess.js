@@ -10,7 +10,7 @@ const RANK = new Map();
 IT_WORDS.split(' ').forEach((w, i) => { if (!RANK.has(w)) RANK.set(w, i); });
 
 // Elision stems ("dell'", "nell'"…) are not words on their own.
-for (const w of ['dell', 'nell', 'sull', 'dall', 'all', 'quell', 'quest', 'anch', 'dov', 'coll', 'pel', 'giulivo', 'sonetto', 'onor', 'gastone', 'paperone', 'paperino', 'topolino', 'paperina', 'fausto', 'taccagno']) if (!RANK.has(w)) RANK.set(w, 300);
+for (const w of ['dell', 'nell', 'sull', 'dall', 'all', 'quell', 'quest', 'anch', 'dov', 'coll', 'pel', 'giulivo', 'sonetto', 'onor', 'gastone', 'paperone', 'paperino', 'topolino', 'paperina', 'fausto', 'taccagno', 'scalognato', 'totalmente', 'disavventura']) if (!RANK.has(w)) RANK.set(w, 300);
 
 // Words whose final vowel always carries an accent. Typeset comics lose it
 // (or print it as a backtick), so the bare form is restored.
@@ -222,6 +222,26 @@ function joinDropCap(text) {
   return m[1] + m[2] + text.slice(m[0].length);
 }
 
+// A word broken over two lines whose hyphen the OCR read as a full stop or
+// dropped ("TOTAL. MENTE", "SCALO GNATO", "DISAV VENTURA"): re-join when the
+// two halves spell a dictionary word and at least one half is not a word.
+function joinSplitWords(text) {
+  // The second half is only looked at (not consumed), so "SARÀ TOTAL. MENTE"
+  // checks "SARÀ+TOTAL" first and then still gets to check "TOTAL+MENTE".
+  return text.replace(/(\p{L}{2,})[-.]?([ \t]*\n[ \t]*|[ \t]+)(?=(\p{L}{2,})(?![\p{L}']))/gu, (m0, a, sep, b) => {
+    const la = a.toLowerCase(), lb = b.toLowerCase();
+    if (!RANK.has(la + lb) || (RANK.has(la) && RANK.has(lb))) return m0;
+    return a;
+  });
+}
+
+// The calendar drawn next to a caption gets read into it ("... TACCAGNO! 1957"
+// after "NEL 1957"): a trailing year that already occurs earlier is artwork.
+function dropTrailingYear(text) {
+  const m = text.match(/^([\s\S]*\S)\s+((?:1[5-9]|20)\d\d)\s*$/);
+  return m && new RegExp('(^|\\D)' + m[2] + '(\\D|$)').test(m[1]) ? m[1] : text;
+}
+
 // Block-level: line fixes plus the "È" sentence-start rule.
 export function fixItalianText(text) {
   if (!text) return text;
@@ -233,6 +253,8 @@ export function fixItalianText(text) {
   if (t.split(/\s+/).length >= 3) {
     t = t.split('\n').map(l => l.split(/\s+/).filter(w => !/^[B-DF-HJ-NP-TV-Z]$/.test(w)).join(' ')).join('\n');
   }
+  t = joinSplitWords(t);
+  t = dropTrailingYear(t);
   const words = t.split(/\s+/).length;
   if (words <= 6) {
     // Short exclamation: a lone "E" opening a sentence before a predicate is "È".
