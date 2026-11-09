@@ -31,5 +31,8 @@ const MAIN = "C'E CHI CERCA IL PEL NELL'UOVO C'ECHI CERCA IL MIEL NEL FAVO... MA
 if (skip(MAIN, 'text_bubble') || skip(MAIN, 'text_free')) { bad++; console.log('FAIL: real balloon text skipped'); }
 if (!skip('E LA VITANUOVA VTAINOOA DELL\' HMMO NUOIO DELL7tT0IW', 'text_free')) { bad++; console.log('FAIL: junk title not skipped'); }
 if (skip('PFUI! E VECCHIO!', 'text_bubble') || skip('CHE FINE HA FATTO QUEL BRAVO PAPERINO', 'text_free')) { bad++; console.log('FAIL: short real text skipped'); }
+const CAP = "L'ANNO NUOVO SARA` TOTAL-\nMENTE DIVERSO DAGLI ALTRI!\nESSO FINISCE PER 7,CHE E` IL\nMIO NUMERO FAUSTO! NEL\n1957, IO NON SARO` PIU` SCALO-\nGNATO,GASTONE NON SARA`\nPIU` FORTUNATO, E LO ZIO\nPAPERONE NON\nSARA` TACCAGNO!";
+if (skip(CAP, 'text_bubble') || skip(CAP, 'text_free')) { bad++; console.log('FAIL: caption with a numeral skipped'); }
+if (!fixItalianText(CAP).includes('GASTONE')) { bad++; console.log('FAIL: GASTONE split'); }
 console.log(bad ? bad + ' failure(s)' : 'all ' + (cases.length + 1) + ' checks passed');
 process.exit(bad ? 1 : 0);

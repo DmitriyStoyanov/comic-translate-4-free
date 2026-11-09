@@ -10,7 +10,7 @@ const RANK = new Map();
 IT_WORDS.split(' ').forEach((w, i) => { if (!RANK.has(w)) RANK.set(w, i); });
 
 // Elision stems ("dell'", "nell'"…) are not words on their own.
-for (const w of ['dell', 'nell', 'sull', 'dall', 'all', 'quell', 'quest', 'anch', 'dov', 'coll', 'pel', 'giulivo', 'sonetto', 'onor']) if (!RANK.has(w)) RANK.set(w, 300);
+for (const w of ['dell', 'nell', 'sull', 'dall', 'all', 'quell', 'quest', 'anch', 'dov', 'coll', 'pel', 'giulivo', 'sonetto', 'onor', 'gastone', 'paperone', 'paperino', 'topolino', 'paperina', 'fausto', 'taccagno']) if (!RANK.has(w)) RANK.set(w, 300);
 
 // Words whose final vowel always carries an accent. Typeset comics lose it
 // (or print it as a backtick), so the bare form is restored.
@@ -269,8 +269,12 @@ export function hasMixedAlnumToken(text) {
 // a low share of real words.
 export function shouldSkipItalianBlock(text, textClass) {
   if (!text) return false;
-  if (isBrandText(text) || hasMixedAlnumToken(text)) return true;
+  if (isBrandText(text)) return true;
   const ratio = italianWordRatio(text);
+  // A digit glued to a word ("PER 7,CHE E` IL MIO NUMERO") is only a sign of
+  // junk when the rest is not real Italian: a caption that is mostly
+  // dictionary words with one numeral in it is a caption.
+  if (hasMixedAlnumToken(text) && (ratio === -1 || ratio < 0.8)) return true;
   if (ratio === -1) return false;
   return ratio < (textClass === 'text_free' ? 0.6 : 0.34);
 }
